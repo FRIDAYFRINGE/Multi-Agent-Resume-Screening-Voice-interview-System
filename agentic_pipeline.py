@@ -25,6 +25,7 @@ class PipelineState(TypedDict):
     evaluations: Annotated[List[Dict[str, Any]], operator.add]
     critique: Optional[Dict[str, Any]]
     final_rankings: List[Dict[str, Any]]
+    interview_questions: Dict[str, Any]   # {candidate_id: {categories...}}
     errors: Annotated[List[str], operator.add]
 
 
@@ -303,6 +304,74 @@ Return ONLY valid JSON:
 
         return {"final_rankings": ranked}
 
+    # ── Interview Question Generator ──────────────────────────────────────────
+    def interview_questions_node(self, state: PipelineState) -> dict:
+        """Generate tailored interview questions for each recommended candidate"""
+        results: Dict[str, Any] = {}
+
+        for ranking in state.get("final_rankings", []):
+            if not ranking.get("recommended_for_interview"):
+                continue
+
+            cid = ranking["candidate_id"]
+            resume = self.candidates.get(cid)
+            if not resume:
+                continue
+
+            prompt = f"""You are a senior technical interviewer. Generate a tailored interview question set for this candidate.
+
+Role being hired for:
+{state['job_description']}
+
+Candidate resume:
+{json.dumps(resume.dict(), indent=2)}
+
+Screening evaluation:
+- Match score: {ranking.get('match_score')}/100
+- Strengths: {json.dumps(ranking.get('strengths', []))}
+- Weaknesses / gaps: {json.dumps(ranking.get('weaknesses', []))}
+- Missing skills: {json.dumps(ranking.get('missing_skills', []))}
+- Matched skills: {json.dumps(ranking.get('matched_skills', []))}
+
+Generate questions that:
+1. Probe depth on claimed strengths (not surface-level)
+2. Directly challenge each identified gap or missing skill
+3. Dig into specific projects they listed (not generic)
+4. Include at least one system design / architecture question relevant to the role
+5. Include one behavioral question tied to a real gap (e.g. "Tell me about leading a team" if leadership is missing)
+
+Return ONLY valid JSON:
+{{
+  "candidate_name": "<name>",
+  "technical_depth": [
+    {{"question": "<q>", "what_to_look_for": "<expected signal>", "follow_up": "<follow up if answer is shallow>"}}
+  ],
+  "gap_probing": [
+    {{"gap": "<missing skill or weakness>", "question": "<q>", "what_to_look_for": "<signal>"}}
+  ],
+  "project_specific": [
+    {{"project": "<project name from resume>", "question": "<q>", "what_to_look_for": "<signal>"}}
+  ],
+  "system_design": [
+    {{"question": "<q>", "what_to_look_for": "<signal>"}}
+  ],
+  "behavioral": [
+    {{"question": "<q>", "what_to_look_for": "<signal>"}}
+  ]
+}}"""
+
+            try:
+                resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=2048)
+                questions = _parse_json_response(resp)
+                questions["candidate_id"] = cid
+                questions["rank"] = ranking["rank"]
+                questions["match_score"] = ranking.get("match_score")
+                results[cid] = questions
+            except Exception as e:
+                results[cid] = {"error": str(e)}
+
+        return {"interview_questions": results}
+
 
 # ─── Graph Builder ────────────────────────────────────────────────────────────
 
@@ -316,13 +385,15 @@ def build_screening_graph(llm: OpenRouterClient, store: CandidateVectorStore, ca
     graph.add_node("evaluator", nodes.evaluator_node)
     graph.add_node("critique", nodes.critique_node)
     graph.add_node("synthesizer", nodes.synthesizer_node)
+    graph.add_node("interview_questions", nodes.interview_questions_node)
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "retriever")
     graph.add_edge("retriever", "evaluator")
     graph.add_edge("evaluator", "critique")
     graph.add_edge("critique", "synthesizer")
-    graph.add_edge("synthesizer", END)
+    graph.add_edge("synthesizer", "interview_questions")
+    graph.add_edge("interview_questions", END)
 
     return graph.compile()
 
@@ -362,6 +433,7 @@ class ScreeningPipeline:
             "evaluations": [],
             "critique": None,
             "final_rankings": [],
+            "interview_questions": {},
             "errors": []
         }
 
