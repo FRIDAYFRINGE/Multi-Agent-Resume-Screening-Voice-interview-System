@@ -147,9 +147,56 @@ Return ONLY valid JSON, no markdown or extra text.
             json_str = json_str.strip()
 
             data = json.loads(json_str)
-            return Resume(**data)
+            return self._dict_to_resume(data)
         except json.JSONDecodeError as e:
             raise Exception(f"Failed to parse LLM response as JSON: {str(e)}")
+
+    def _dict_to_resume(self, data: dict) -> Resume:
+        """Convert raw dict from LLM into nested Resume dataclass"""
+        from schemas import ContactInfo, Education, Experience, Skill, Certification, Project, Language
+
+        ci = data.get("contact_info") or {}
+        contact_info = ContactInfo(**{k: v for k, v in ci.items() if k in ContactInfo.__dataclass_fields__}) if ci else ContactInfo()
+
+        skills = [
+            Skill(category=s.get("category"), skills=s.get("skills", []))
+            for s in (data.get("skills") or [])
+        ]
+        experience = [
+            Experience(**{k: v for k, v in e.items() if k in Experience.__dataclass_fields__})
+            for e in (data.get("experience") or [])
+        ]
+        education = [
+            Education(**{k: v for k, v in e.items() if k in Education.__dataclass_fields__})
+            for e in (data.get("education") or [])
+        ]
+        certifications = [
+            Certification(**{k: v for k, v in c.items() if k in Certification.__dataclass_fields__})
+            for c in (data.get("certifications") or [])
+        ]
+        projects = [
+            Project(**{k: v for k, v in p.items() if k in Project.__dataclass_fields__})
+            for p in (data.get("projects") or [])
+        ]
+        languages = [
+            Language(language=l.get("language"), proficiency=l.get("proficiency"))
+            for l in (data.get("languages") or [])
+        ]
+
+        return Resume(
+            contact_info=contact_info,
+            professional_summary=data.get("professional_summary"),
+            skills=skills,
+            experience=experience,
+            education=education,
+            certifications=certifications,
+            projects=projects,
+            languages=languages,
+            publications=data.get("publications") or [],
+            volunteer_experience=data.get("volunteer_experience") or [],
+            awards_recognition=data.get("awards_recognition") or [],
+            metadata=data.get("metadata") or {}
+        )
 
     def evaluate_candidate(
         self,

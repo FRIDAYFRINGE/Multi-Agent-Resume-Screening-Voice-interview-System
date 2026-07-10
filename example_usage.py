@@ -3,11 +3,16 @@ Example usage of the Resume Screening Assistant
 """
 
 import os
+import sys
 import json
 from dotenv import load_dotenv
 from resume_parser import ResumeParser
 from openrouter_client import OpenRouterClient
 from agentic_pipeline import ScreeningPipeline, ScreeningQuery
+
+# Fix Windows encoding for Unicode output
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 # Load environment variables
 load_dotenv()
