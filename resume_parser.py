@@ -1,8 +1,8 @@
-import fitz
 import json
 from typing import Optional
 from schemas import Resume
 import re
+from PyPDF2 import PdfReader
 
 
 class ResumeParser:
@@ -10,13 +10,13 @@ class ResumeParser:
         self.extracted_text = ""
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract text from PDF using PyMuPDF"""
+        """Extract text from PDF using PyPDF2"""
         try:
-            doc = fitz.open(pdf_path)
             text = ""
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                text += page.get_text()
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PdfReader(file)
+                for page in pdf_reader.pages:
+                    text += page.extract_text()
             self.extracted_text = text
             return text
         except Exception as e:

@@ -1,29 +1,29 @@
 import json
 from typing import Dict, List, Any, Optional
-from pydantic import BaseModel
+from dataclasses import dataclass, field
 from openrouter_client import OpenRouterClient
 from schemas import Resume
-import chromadb
-from chromadb.config import Settings
 
 
-class ScreeningQuery(BaseModel):
+@dataclass
+class ScreeningQuery:
     job_description: str
-    required_skills: List[str] = []
+    required_skills: List[str] = field(default_factory=list)
     min_experience_years: Optional[int] = None
     required_education: Optional[str] = None
     evaluation_criteria: Optional[Dict[str, Any]] = None
 
 
-class ScreeningPipelineState(BaseModel):
+@dataclass
+class ScreeningPipelineState:
     query: ScreeningQuery
-    candidates: List[Resume] = []
+    candidates: List[Resume] = field(default_factory=list)
     plan: Optional[Dict[str, Any]] = None
-    retrieved_candidates: List[Dict[str, Any]] = []
-    evaluations: List[Dict[str, Any]] = []
-    final_rankings: List[Dict[str, Any]] = []
+    retrieved_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    evaluations: List[Dict[str, Any]] = field(default_factory=list)
+    final_rankings: List[Dict[str, Any]] = field(default_factory=list)
     critique_feedback: Optional[str] = None
-    errors: List[str] = []
+    errors: List[str] = field(default_factory=list)
 
 
 class PlannerAgent:
@@ -71,33 +71,15 @@ Return ONLY valid JSON.
 
 
 class RetrievalAgent:
-    """Searches and retrieves candidate embeddings from ChromaDB"""
+    """Searches and retrieves candidates using keyword matching"""
 
-    def __init__(self, collection_name: str = "candidates"):
-        self.client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb",
-            persist_directory="./chroma_db",
-            anonymized_telemetry=False
-        ))
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"}
-        )
+    def __init__(self):
+        self.candidates: Dict[str, tuple[Resume, str]] = {}  # {id: (resume, text)}
 
     def add_candidate(self, resume: Resume, candidate_id: str, metadata: Optional[Dict] = None):
-        """Add candidate resume to vector store"""
-        # Create text representation for embedding
+        """Add candidate resume to search index"""
         text = self._resume_to_text(resume)
-
-        embed_metadata = metadata or {}
-        embed_metadata["candidate_id"] = candidate_id
-        embed_metadata["name"] = resume.contact_info.name if resume.contact_info else "Unknown"
-
-        self.collection.add(
-            ids=[candidate_id],
-            documents=[text],
-            metadatas=[embed_metadata]
-        )
+        self.candidates[candidate_id] = (resume, text)
 
     def search_candidates(
         self,
@@ -105,23 +87,21 @@ class RetrievalAgent:
         top_k: int = 10,
         filter_metadata: Optional[Dict] = None
     ) -> List[Dict[str, Any]]:
-        """Search for candidates using semantic search"""
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            where=filter_metadata
-        )
+        """Search for candidates using keyword matching"""
+        query_terms = set(query.lower().split())
+        results = []
 
-        candidates = []
-        if results and results['ids'] and len(results['ids']) > 0:
-            for i, candidate_id in enumerate(results['ids'][0]):
-                candidates.append({
-                    "id": candidate_id,
-                    "similarity": results['distances'][0][i] if results['distances'] else None,
-                    "metadata": results['metadatas'][0][i] if results['metadatas'] else {}
+        for cid, (resume, text) in self.candidates.items():
+            text_lower = text.lower()
+            matches = sum(1 for term in query_terms if term in text_lower)
+            if matches > 0:
+                results.append({
+                    "id": cid,
+                    "match_score": matches / len(query_terms) if query_terms else 0,
+                    "metadata": {"name": resume.contact_info.name if resume.contact_info else "Unknown"}
                 })
 
-        return candidates
+        return sorted(results, key=lambda x: x["match_score"], reverse=True)[:top_k]
 
     def _resume_to_text(self, resume: Resume) -> str:
         """Convert resume to searchable text"""
