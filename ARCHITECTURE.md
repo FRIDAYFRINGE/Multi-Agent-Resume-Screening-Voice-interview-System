@@ -419,6 +419,132 @@ interview_agentic/
 
 ---
 
+## Cost Analysis
+
+### Token Length Assumptions
+
+```
+Document              Avg Words    Avg Tokens    Notes
+──────────────────────────────────────────────────────────────────────
+Resume (raw text)     400–600 w    500–800 tok   1 page = ~400w,
+                                                 2 page = ~700w
+                      assumed avg: 600 tokens raw text
+
+Extraction prompt     —            ~300 tok      Fixed system prompt
+                                                 + JSON schema
+
+Resume JSON output    —            ~800 tok      Structured fields,
+                                                 all sections filled
+
+Job Description (JD)  200–400 w    ~500 tok      Typical JD with
+                                                 requirements, role,
+                                                 responsibilities
+
+Evaluation prompt     —            ~300 tok      Fixed recruiter prompt
+                                                 + weights + hard reqs
+
+Evaluation output     —            ~500 tok      JSON: scores, skills,
+                                                 reasoning, recommendation
+
+Critique input        —            500 tok/eval  JD + N evaluations
+                      (per eval)                 stacked in one prompt
+
+IQ prompt             —            ~500 tok      Fixed interviewer prompt
+                                                 + strengths/gaps context
+
+IQ output             —            ~1500 tok     5 categories × 3 qs
+                                                 with signals + follow-ups
+```
+
+---
+
+### Per-Stage Token Breakdown (1 JD × 1000 Resumes)
+
+```
+Stage                   Calls    Input Tokens        Output Tokens
+────────────────────────────────────────────────────────────────────────
+Ingestion               1000     (600 raw + 300       800 (JSON output)
+(parse resumes)                   prompt) × 1000      per resume
+                                 = 900K input         = 800K output
+
+Planner                    1     JD(500) + instr      plan JSON
+                                 = ~500 input         = ~300 output
+
+Retriever (ChromaDB)       0     —                    —          FREE
+                                 ONNX embeddings run locally
+
+Evaluator               top 20   JD(500) + resume     eval JSON
+(1 call/candidate)               JSON(800) + prompt   = ~500 output
+                                 (300) = 1600/each
+                                 × 20 = 32K input     = 10K output
+
+Critique                   1     JD(500) + 20 evals   critique JSON
+                                 (500 each = 10K) +   = ~500 output
+                                 prompt(300)
+                                 = ~10.8K input
+
+Synthesizer                0     —                    —          FREE
+                                 deterministic sort, no LLM
+
+Interview Questions        5     JD(500) + resume      questions JSON
+(top 5 recommended)              JSON(800) + eval      = ~1500/each
+                                 (600) + prompt(500)   × 5 = 7.5K output
+                                 = 2400/each
+                                 × 5 = 12K input
+────────────────────────────────────────────────────────────────────────
+TOTAL                   1026     ~1,155K input        ~818K output
+```
+
+---
+
+### Cost Estimate — DeepSeek V3 via OpenRouter
+
+```
+Model : deepseek/deepseek-chat  (DeepSeek V3 / v4 Flash)
+Rates : $0.14 / 1M input tokens   |   $0.28 / 1M output tokens
+```
+
+```
+Stage                   Input Cost      Output Cost     Stage Total
+────────────────────────────────────────────────────────────────────
+Ingestion (1000 resumes) $0.126          $0.224          $0.350
+Planner                  $0.000          $0.000          $0.000
+Retriever                FREE            FREE            $0.000
+Evaluator (top 20)       $0.004          $0.003          $0.007
+Critique                 $0.002          $0.000          $0.002
+Synthesizer              FREE            FREE            $0.000
+Interview Qs (top 5)     $0.002          $0.002          $0.004
+────────────────────────────────────────────────────────────────────
+TOTAL                    $0.134          $0.229          $0.363
+```
+
+---
+
+### Scaling Table
+
+```
+Scenario                                          Est. Cost
+──────────────────────────────────────────────────────────────
+1 JD  ×  1,000 resumes  (first parse + screen)    ~$0.39
+1 JD  ×  1,000 resumes  (already parsed, new JD)  ~$0.01
+10 JDs ×  1,000 resumes (parse once, 10 screens)  ~$0.49
+1 JD  × 10,000 resumes  (first parse + screen)    ~$3.64
+1 JD  × 10,000 resumes  (already parsed, new JD)  ~$0.07
+```
+
+**Key observations:**
+
+- Ingestion is ~97% of total cost — and it is one-time per resume
+- Once 1000 resumes are parsed and indexed in ChromaDB, any new JD
+  costs only ~$0.01 to screen against them (Planner + Evaluator +
+  Critique + Interview Qs)
+- ChromaDB embeddings (all-MiniLM-L6-v2 via ONNX) run entirely
+  locally — zero cost regardless of scale
+- Cost per resume to parse: ~$0.00039  (less than 0.04 cents)
+- Cost per JD screening run (post-parse): ~$0.013
+
+---
+
 ## Technology Stack
 
 ```
