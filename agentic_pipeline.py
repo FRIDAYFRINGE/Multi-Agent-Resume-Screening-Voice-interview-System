@@ -1,8 +1,31 @@
 import json
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TypedDict, Annotated
+import operator
 from dataclasses import dataclass, field
+
+from langgraph.graph import StateGraph, END
+import chromadb
+from chromadb.config import Settings
+
 from openrouter_client import OpenRouterClient
 from schemas import Resume
+
+
+# ─── LangGraph State ──────────────────────────────────────────────────────────
+
+class PipelineState(TypedDict):
+    job_description: str
+    required_skills: List[str]
+    min_experience_years: Optional[int]
+    required_education: Optional[str]
+    evaluation_criteria: Optional[Dict[str, Any]]
+    plan: Optional[Dict[str, Any]]
+    search_queries: List[str]
+    retrieved_ids: List[str]
+    evaluations: Annotated[List[Dict[str, Any]], operator.add]
+    critique: Optional[Dict[str, Any]]
+    final_rankings: List[Dict[str, Any]]
+    errors: Annotated[List[str], operator.add]
 
 
 @dataclass
@@ -14,248 +37,332 @@ class ScreeningQuery:
     evaluation_criteria: Optional[Dict[str, Any]] = None
 
 
-@dataclass
-class ScreeningPipelineState:
-    query: ScreeningQuery
-    candidates: List[Resume] = field(default_factory=list)
-    plan: Optional[Dict[str, Any]] = None
-    retrieved_candidates: List[Dict[str, Any]] = field(default_factory=list)
-    evaluations: List[Dict[str, Any]] = field(default_factory=list)
-    final_rankings: List[Dict[str, Any]] = field(default_factory=list)
-    critique_feedback: Optional[str] = None
-    errors: List[str] = field(default_factory=list)
+# ─── ChromaDB Vector Store ────────────────────────────────────────────────────
 
+class CandidateVectorStore:
+    """ChromaDB-backed vector store for candidate embeddings and semantic search"""
 
-class PlannerAgent:
-    """Decomposes screening queries into search and evaluation sub-tasks"""
+    def __init__(self, persist_path: str = "./chroma_db"):
+        self.client = chromadb.PersistentClient(path=persist_path)
+        # Uses chromadb's default all-MiniLM-L6-v2 embedding function
+        self.collection = self.client.get_or_create_collection(
+            name="candidates",
+            metadata={"hnsw:space": "cosine"}
+        )
 
-    def __init__(self, llm_client: OpenRouterClient):
-        self.llm = llm_client
-
-    def plan(self, query: ScreeningQuery) -> Dict[str, Any]:
-        """Create a plan for candidate screening"""
-        prompt = f"""
-You are a screening coordinator. Create a detailed plan for screening candidates.
-
-Job Description:
-{query.job_description}
-
-Required Skills:
-{', '.join(query.required_skills) if query.required_skills else 'Not specified'}
-
-Minimum Experience: {query.min_experience_years} years
-Required Education: {query.required_education or 'Not specified'}
-
-Create a JSON plan with:
-{{
-    "search_queries": [string],  // Semantic search queries
-    "evaluation_focus_areas": [string],  // Key areas to evaluate
-    "scoring_weights": {{"skills": float, "experience": float, "education": float}},
-    "rejection_criteria": [string],  // Auto-reject if any match
-    "top_candidate_count": int
-}}
-
-Return ONLY valid JSON.
-"""
-        messages = [{"role": "user", "content": prompt}]
-        response = self.llm.call_llm(messages, temperature=0.3)
-
-        json_str = response.strip()
-        if json_str.startswith("```"):
-            json_str = json_str.split("```")[1]
-            if json_str.startswith("json"):
-                json_str = json_str[4:]
-        json_str = json_str.strip()
-
-        return json.loads(json_str)
-
-
-class RetrievalAgent:
-    """Searches and retrieves candidates using keyword matching"""
-
-    def __init__(self):
-        self.candidates: Dict[str, tuple[Resume, str]] = {}  # {id: (resume, text)}
-
-    def add_candidate(self, resume: Resume, candidate_id: str, metadata: Optional[Dict] = None):
-        """Add candidate resume to search index"""
+    def add_candidate(self, resume: Resume, candidate_id: str):
+        """Embed and store candidate resume"""
         text = self._resume_to_text(resume)
-        self.candidates[candidate_id] = (resume, text)
+        name = resume.contact_info.name if resume.contact_info else "Unknown"
 
-    def search_candidates(
-        self,
-        query: str,
-        top_k: int = 10,
-        filter_metadata: Optional[Dict] = None
-    ) -> List[Dict[str, Any]]:
-        """Search for candidates using keyword matching"""
-        query_terms = set(query.lower().split())
-        results = []
+        # Upsert so re-adding same ID doesn't error
+        self.collection.upsert(
+            ids=[candidate_id],
+            documents=[text],
+            metadatas=[{
+                "name": name,
+                "email": resume.contact_info.email or "" if resume.contact_info else "",
+                "skills_flat": self._skills_flat(resume),
+            }]
+        )
 
-        for cid, (resume, text) in self.candidates.items():
-            text_lower = text.lower()
-            matches = sum(1 for term in query_terms if term in text_lower)
-            if matches > 0:
-                results.append({
+    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """Semantic search returning top_k candidates"""
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=min(top_k, self.collection.count() or 1)
+        )
+
+        candidates = []
+        if results and results["ids"] and results["ids"][0]:
+            for i, cid in enumerate(results["ids"][0]):
+                distance = results["distances"][0][i] if results.get("distances") else 1.0
+                candidates.append({
                     "id": cid,
-                    "match_score": matches / len(query_terms) if query_terms else 0,
-                    "metadata": {"name": resume.contact_info.name if resume.contact_info else "Unknown"}
+                    "similarity_score": round(1 - distance, 4),  # cosine: distance=0 → similarity=1
+                    "metadata": results["metadatas"][0][i] if results.get("metadatas") else {}
                 })
+        return candidates
 
-        return sorted(results, key=lambda x: x["match_score"], reverse=True)[:top_k]
+    def count(self) -> int:
+        return self.collection.count()
 
     def _resume_to_text(self, resume: Resume) -> str:
-        """Convert resume to searchable text"""
         parts = []
-
         if resume.professional_summary:
             parts.append(resume.professional_summary)
-
-        for skill_cat in resume.skills:
-            if skill_cat.skills:
-                parts.append(" ".join(skill_cat.skills))
-
+        for s in resume.skills:
+            parts.extend(s.skills)
         for exp in resume.experience:
+            if exp.position:
+                parts.append(exp.position)
             if exp.description:
                 parts.append(exp.description)
             if exp.technologies:
-                parts.append(" ".join(exp.technologies))
-
+                parts.extend(exp.technologies)
+            if exp.achievements:
+                parts.extend(exp.achievements)
         for edu in resume.education:
+            if edu.degree:
+                parts.append(edu.degree)
             if edu.field_of_study:
                 parts.append(edu.field_of_study)
-            if edu.description:
-                parts.append(edu.description)
+        for cert in resume.certifications:
+            if cert.title:
+                parts.append(cert.title)
+        for proj in resume.projects:
+            if proj.description:
+                parts.append(proj.description)
+            if proj.technologies:
+                parts.extend(proj.technologies)
+        return " ".join(filter(None, parts))
 
-        return " ".join(parts)
+    def _skills_flat(self, resume: Resume) -> str:
+        return ", ".join(skill for s in resume.skills for skill in s.skills)
 
 
-class CritiqueAgent:
-    """Validates evaluations against JD requirements"""
+# ─── Agent Nodes ──────────────────────────────────────────────────────────────
 
-    def __init__(self, llm_client: OpenRouterClient):
-        self.llm = llm_client
+def _parse_json_response(response: str) -> dict:
+    """Strip markdown fences and parse JSON"""
+    text = response.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return json.loads(text.strip())
 
-    def validate_evaluations(
-        self,
-        evaluations: List[Dict[str, Any]],
-        job_description: str,
-        plan: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Critique and validate candidate evaluations"""
 
-        prompt = f"""
-You are a quality assurance expert reviewing candidate evaluations.
+class AgentNodes:
+    def __init__(self, llm: OpenRouterClient, store: CandidateVectorStore, candidate_store: Dict[str, Resume]):
+        self.llm = llm
+        self.store = store
+        self.candidates = candidate_store
+
+    # ── Planner ───────────────────────────────────────────────────────────────
+    def planner_node(self, state: PipelineState) -> dict:
+        """Decompose the job description into a structured screening plan"""
+        prompt = f"""You are a recruiting planner. Given the job description below, create a structured screening plan.
 
 Job Description:
-{job_description}
+{state['job_description']}
 
-Screening Plan:
-{json.dumps(plan, indent=2)}
+Required Skills: {', '.join(state.get('required_skills', []) or [])}
+Min Experience: {state.get('min_experience_years')} years
+Required Education: {state.get('required_education', 'Not specified')}
 
-Candidate Evaluations:
-{json.dumps(evaluations[:5], indent=2)}  // First 5 for brevity
-
-Validate these evaluations. Return a JSON with:
+Return ONLY valid JSON:
 {{
-    "is_valid": bool,
-    "issues": [string],  // Issues found
-    "recommendations": [string],  // Suggested adjustments
-    "top_candidates": [string],  // IDs of top candidates to interview
-    "pass_rate": float,  // Percentage of viable candidates
-    "feedback": string  // Overall feedback
-}}
-
-Return ONLY valid JSON.
-"""
-        messages = [{"role": "user", "content": prompt}]
-        response = self.llm.call_llm(messages, temperature=0.3)
-
-        json_str = response.strip()
-        if json_str.startswith("```"):
-            json_str = json_str.split("```")[1]
-            if json_str.startswith("json"):
-                json_str = json_str[4:]
-        json_str = json_str.strip()
-
-        return json.loads(json_str)
-
-
-class ScreeningPipeline:
-    """Main agentic screening pipeline orchestrator"""
-
-    def __init__(self, openrouter_api_key: Optional[str] = None):
-        self.llm = OpenRouterClient(openrouter_api_key)
-        self.planner = PlannerAgent(self.llm)
-        self.retriever = RetrievalAgent()
-        self.critic = CritiqueAgent(self.llm)
-        self.candidate_store: Dict[str, Resume] = {}
-
-    def add_candidate(self, resume: Resume, candidate_id: str):
-        """Add candidate to pipeline"""
-        self.candidate_store[candidate_id] = resume
-        self.retriever.add_candidate(resume, candidate_id)
-
-    def screen_candidates(self, query: ScreeningQuery) -> ScreeningPipelineState:
-        """Run full screening pipeline"""
-        state = ScreeningPipelineState(query=query)
-        state.candidates = list(self.candidate_store.values())
+  "search_queries": ["<semantic query 1>", "<semantic query 2>", "<semantic query 3>"],
+  "evaluation_focus_areas": ["<area1>", "<area2>"],
+  "scoring_weights": {{"skills": 0.4, "experience": 0.35, "education": 0.15, "projects": 0.1}},
+  "hard_requirements": ["<must-have 1>", "<must-have 2>"],
+  "nice_to_have": ["<optional 1>"],
+  "top_candidate_count": 5
+}}"""
 
         try:
-            # Step 1: Planning
-            state.plan = self.planner.plan(query)
-
-            # Step 2: Retrieval - semantic search using ChromaDB
-            search_queries = state.plan.get("search_queries", [])
-            all_retrieved = set()
-            for search_query in search_queries:
-                results = self.retriever.search_candidates(search_query, top_k=20)
-                all_retrieved.update([r["id"] for r in results])
-            state.retrieved_candidates = list(all_retrieved)
-
-            # Step 3: Evaluation - score candidates
-            for candidate_id in state.retrieved_candidates:
-                if candidate_id in self.candidate_store:
-                    resume = self.candidate_store[candidate_id]
-                    evaluation = self.llm.evaluate_candidate(
-                        resume,
-                        query.job_description,
-                        query.evaluation_criteria
-                    )
-                    evaluation["candidate_id"] = candidate_id
-                    state.evaluations.append(evaluation)
-
-            # Step 4: Critique - validate results
-            if state.evaluations:
-                critique = self.critic.validate_evaluations(
-                    state.evaluations,
-                    query.job_description,
-                    state.plan
-                )
-                state.critique_feedback = critique.get("feedback", "")
-
-                # Step 5: Ranking - final rankings
-                state.final_rankings = self._rank_candidates(state.evaluations, critique)
-
+            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.2)
+            plan = _parse_json_response(resp)
+            return {
+                "plan": plan,
+                "search_queries": plan.get("search_queries", [state['job_description']])
+            }
         except Exception as e:
-            state.errors.append(f"Pipeline error: {str(e)}")
+            return {"plan": {}, "search_queries": [state['job_description']], "errors": [f"Planner error: {e}"]}
 
-        return state
+    # ── Retriever ─────────────────────────────────────────────────────────────
+    def retriever_node(self, state: PipelineState) -> dict:
+        """Use ChromaDB semantic search to retrieve relevant candidates"""
+        if self.store.count() == 0:
+            return {"retrieved_ids": [], "errors": ["No candidates indexed in ChromaDB"]}
 
-    def _rank_candidates(
-        self,
-        evaluations: List[Dict[str, Any]],
-        critique: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Rank candidates based on evaluations"""
-        # Sort by match score
-        ranked = sorted(
-            evaluations,
-            key=lambda x: x.get("match_score", 0),
-            reverse=True
-        )
+        seen = set()
+        results = []
+        for query in state.get("search_queries", []):
+            for hit in self.store.search(query, top_k=10):
+                if hit["id"] not in seen:
+                    seen.add(hit["id"])
+                    results.append(hit)
 
-        # Add rank
-        for i, candidate in enumerate(ranked):
-            candidate["rank"] = i + 1
+        # Sort by similarity descending, take top 20
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        retrieved_ids = [r["id"] for r in results[:20]]
 
-        return ranked
+        return {"retrieved_ids": retrieved_ids}
+
+    # ── Evaluator ─────────────────────────────────────────────────────────────
+    def evaluator_node(self, state: PipelineState) -> dict:
+        """Score each retrieved candidate against the JD"""
+        evaluations = []
+        plan = state.get("plan", {})
+
+        for cid in state.get("retrieved_ids", []):
+            if cid not in self.candidates:
+                continue
+            resume = self.candidates[cid]
+
+            prompt = f"""You are an expert recruiter. Evaluate this candidate against the job description.
+
+Job Description:
+{state['job_description']}
+
+Scoring weights: {json.dumps(plan.get('scoring_weights', {}))}
+Hard requirements: {json.dumps(plan.get('hard_requirements', []))}
+Nice to have: {json.dumps(plan.get('nice_to_have', []))}
+
+Candidate Resume (JSON):
+{json.dumps(resume.dict(), indent=2)}
+
+Return ONLY valid JSON:
+{{
+  "match_score": <float 0-100>,
+  "skills_score": <float 0-100>,
+  "experience_score": <float 0-100>,
+  "education_score": <float 0-100>,
+  "strengths": ["<strength1>", "<strength2>"],
+  "weaknesses": ["<gap1>", "<gap2>"],
+  "matched_skills": ["<skill1>"],
+  "missing_skills": ["<skill1>"],
+  "meets_hard_requirements": <true|false>,
+  "overall_recommendation": "<STRONG_MATCH|MATCH|WEAK_MATCH|NOT_QUALIFIED>",
+  "reasoning": "<1-2 sentence summary>",
+  "suggested_interview_questions": ["<q1>", "<q2>"]
+}}"""
+
+            try:
+                resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.2)
+                evaluation = _parse_json_response(resp)
+                evaluation["candidate_id"] = cid
+                evaluation["candidate_name"] = resume.contact_info.name if resume.contact_info else cid
+                evaluations.append(evaluation)
+            except Exception as e:
+                evaluations.append({
+                    "candidate_id": cid,
+                    "match_score": 0,
+                    "overall_recommendation": "ERROR",
+                    "reasoning": str(e)
+                })
+
+        return {"evaluations": evaluations}
+
+    # ── Critique ──────────────────────────────────────────────────────────────
+    def critique_node(self, state: PipelineState) -> dict:
+        """Validate evaluations for consistency and flag any issues"""
+        evaluations = state.get("evaluations", [])
+        if not evaluations:
+            return {"critique": {"is_valid": False, "issues": ["No candidates evaluated"]}}
+
+        prompt = f"""You are a QA reviewer for a recruitment pipeline. Review these candidate evaluations for consistency.
+
+Job Description (summary):
+{state['job_description'][:500]}
+
+Evaluations:
+{json.dumps(evaluations, indent=2)}
+
+Check for: score inflation/deflation, ignored hard requirements, inconsistent recommendations.
+
+Return ONLY valid JSON:
+{{
+  "is_valid": <true|false>,
+  "issues_found": ["<issue1>"],
+  "adjustments": [{{"candidate_id": "<id>", "adjusted_score": <float>, "reason": "<why>"}}],
+  "recommended_for_interview": ["<candidate_id1>", "<candidate_id2>"],
+  "overall_quality": "<GOOD|ACCEPTABLE|NEEDS_REVIEW>",
+  "summary": "<1-2 sentence summary of the candidate pool>"
+}}"""
+
+        try:
+            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.2)
+            critique = _parse_json_response(resp)
+
+            # Apply score adjustments from critique
+            adjustments = {a["candidate_id"]: a["adjusted_score"] for a in critique.get("adjustments", [])}
+            for ev in evaluations:
+                cid = ev.get("candidate_id")
+                if cid in adjustments:
+                    ev["match_score"] = adjustments[cid]
+                    ev["score_adjusted"] = True
+
+            return {"critique": critique}
+        except Exception as e:
+            return {"critique": {"is_valid": False, "issues_found": [f"Critique error: {e}"]}, "errors": [str(e)]}
+
+    # ── Synthesizer ───────────────────────────────────────────────────────────
+    def synthesizer_node(self, state: PipelineState) -> dict:
+        """Produce final ranked list"""
+        evaluations = state.get("evaluations", [])
+        critique = state.get("critique", {})
+        recommended_ids = set(critique.get("recommended_for_interview", []))
+
+        ranked = sorted(evaluations, key=lambda x: x.get("match_score", 0), reverse=True)
+        for i, ev in enumerate(ranked):
+            ev["rank"] = i + 1
+            ev["recommended_for_interview"] = ev.get("candidate_id") in recommended_ids
+
+        return {"final_rankings": ranked}
+
+
+# ─── Graph Builder ────────────────────────────────────────────────────────────
+
+def build_screening_graph(llm: OpenRouterClient, store: CandidateVectorStore, candidate_store: Dict[str, Resume]):
+    """Construct and compile the LangGraph screening pipeline"""
+    nodes = AgentNodes(llm, store, candidate_store)
+
+    graph = StateGraph(PipelineState)
+    graph.add_node("planner", nodes.planner_node)
+    graph.add_node("retriever", nodes.retriever_node)
+    graph.add_node("evaluator", nodes.evaluator_node)
+    graph.add_node("critique", nodes.critique_node)
+    graph.add_node("synthesizer", nodes.synthesizer_node)
+
+    graph.set_entry_point("planner")
+    graph.add_edge("planner", "retriever")
+    graph.add_edge("retriever", "evaluator")
+    graph.add_edge("evaluator", "critique")
+    graph.add_edge("critique", "synthesizer")
+    graph.add_edge("synthesizer", END)
+
+    return graph.compile()
+
+
+# ─── Pipeline Facade ──────────────────────────────────────────────────────────
+
+class ScreeningPipeline:
+    def __init__(self, openrouter_api_key: Optional[str] = None, chroma_path: str = "./chroma_db"):
+        self.llm = OpenRouterClient(openrouter_api_key)
+        self.store = CandidateVectorStore(chroma_path)
+        self.candidate_store: Dict[str, Resume] = {}
+        self._graph = None
+
+    def _get_graph(self):
+        if self._graph is None:
+            self._graph = build_screening_graph(self.llm, self.store, self.candidate_store)
+        return self._graph
+
+    def add_candidate(self, resume: Resume, candidate_id: str):
+        self.candidate_store[candidate_id] = resume
+        self.store.add_candidate(resume, candidate_id)
+        self._graph = None  # Rebuild graph with updated store
+
+    def screen_candidates(self, query: ScreeningQuery) -> dict:
+        """Run the full LangGraph pipeline and return state"""
+        graph = self._get_graph()
+
+        initial_state: PipelineState = {
+            "job_description": query.job_description,
+            "required_skills": query.required_skills or [],
+            "min_experience_years": query.min_experience_years,
+            "required_education": query.required_education,
+            "evaluation_criteria": query.evaluation_criteria,
+            "plan": None,
+            "search_queries": [],
+            "retrieved_ids": [],
+            "evaluations": [],
+            "critique": None,
+            "final_rankings": [],
+            "errors": []
+        }
+
+        return graph.invoke(initial_state)
