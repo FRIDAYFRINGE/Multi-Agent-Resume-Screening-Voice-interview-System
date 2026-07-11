@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any, Optional, TypedDict, Annotated
 import operator
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ class CandidateVectorStore:
                 "name": name,
                 "email": resume.contact_info.email or "" if resume.contact_info else "",
                 "skills_flat": self._skills_flat(resume),
+                "resume_json": json.dumps(resume.dict()),
             }]
         )
 
@@ -87,6 +89,17 @@ class CandidateVectorStore:
 
     def count(self) -> int:
         return self.collection.count()
+
+    def get_candidate_data(self, candidate_id: str) -> Optional[dict]:
+        """Retrieve resume dict from ChromaDB (stored as JSON in metadata)."""
+        try:
+            result = self.collection.get(ids=[candidate_id], include=["metadatas"])
+            if result and result.get("ids"):
+                rj = result["metadatas"][0].get("resume_json", "")
+                return json.loads(rj) if rj else None
+        except Exception:
+            pass
+        return None
 
     def _resume_to_text(self, resume: Resume) -> str:
         parts = []
@@ -174,34 +187,43 @@ Return ONLY valid JSON:
 
     # ── Retriever ─────────────────────────────────────────────────────────────
     def retriever_node(self, state: PipelineState) -> dict:
-        """Use ChromaDB semantic search to retrieve relevant candidates"""
-        if self.store.count() == 0:
+        """Retrieve ALL candidates from ChromaDB, ranked by semantic similarity."""
+        pool_size = self.store.count()
+        if pool_size == 0:
             return {"retrieved_ids": [], "errors": ["No candidates indexed in ChromaDB"]}
 
+        # Fetch every candidate for each query (top_k = full pool), then dedup.
+        # This guarantees newly uploaded resumes are always evaluated regardless
+        # of how they rank against existing candidates.
         seen = set()
         results = []
         for query in state.get("search_queries", []):
-            for hit in self.store.search(query, top_k=10):
+            for hit in self.store.search(query, top_k=pool_size):
                 if hit["id"] not in seen:
                     seen.add(hit["id"])
                     results.append(hit)
 
-        # Sort by similarity descending, take top 20
+        # Sort by best similarity score seen across all queries
         results.sort(key=lambda x: x["similarity_score"], reverse=True)
-        retrieved_ids = [r["id"] for r in results[:20]]
-
-        return {"retrieved_ids": retrieved_ids}
+        return {"retrieved_ids": [r["id"] for r in results]}
 
     # ── Evaluator ─────────────────────────────────────────────────────────────
     def evaluator_node(self, state: PipelineState) -> dict:
-        """Score each retrieved candidate against the JD"""
-        evaluations = []
+        """Score each retrieved candidate against the JD — parallel LLM calls."""
         plan = state.get("plan", {})
+        retrieved_ids = state.get("retrieved_ids", [])
 
-        for cid in state.get("retrieved_ids", []):
-            if cid not in self.candidates:
-                continue
-            resume = self.candidates[cid]
+        def eval_one(cid: str) -> dict:
+            if cid in self.candidates:
+                resume_dict = self.candidates[cid].dict()
+                ci = self.candidates[cid].contact_info
+                name = (ci.name if ci else None) or cid
+            else:
+                resume_dict = self.store.get_candidate_data(cid)
+                if not resume_dict:
+                    return None
+                ci = resume_dict.get("contact_info") or {}
+                name = ci.get("name") or cid
 
             prompt = f"""You are an expert recruiter. Evaluate this candidate against the job description.
 
@@ -213,7 +235,7 @@ Hard requirements: {json.dumps(plan.get('hard_requirements', []))}
 Nice to have: {json.dumps(plan.get('nice_to_have', []))}
 
 Candidate Resume (JSON):
-{json.dumps(resume.dict(), indent=2)}
+{json.dumps(resume_dict, indent=2)}
 
 Return ONLY valid JSON:
 {{
@@ -233,17 +255,21 @@ Return ONLY valid JSON:
 
             try:
                 resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.2)
-                evaluation = _parse_json_response(resp)
-                evaluation["candidate_id"] = cid
-                evaluation["candidate_name"] = resume.contact_info.name if resume.contact_info else cid
-                evaluations.append(evaluation)
+                ev = _parse_json_response(resp)
+                ev["candidate_id"] = cid
+                ev["candidate_name"] = name
+                return ev
             except Exception as e:
-                evaluations.append({
-                    "candidate_id": cid,
-                    "match_score": 0,
-                    "overall_recommendation": "ERROR",
-                    "reasoning": str(e)
-                })
+                return {"candidate_id": cid, "candidate_name": name,
+                        "match_score": 0, "overall_recommendation": "ERROR", "reasoning": str(e)}
+
+        evaluations = []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(eval_one, cid): cid for cid in retrieved_ids}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    evaluations.append(result)
 
         return {"evaluations": evaluations}
 
@@ -306,17 +332,17 @@ Return ONLY valid JSON:
 
     # ── Interview Question Generator ──────────────────────────────────────────
     def interview_questions_node(self, state: PipelineState) -> dict:
-        """Generate tailored interview questions for each recommended candidate"""
-        results: Dict[str, Any] = {}
+        """Generate tailored interview questions for recommended candidates — parallel."""
+        recommended = [r for r in state.get("final_rankings", []) if r.get("recommended_for_interview")]
 
-        for ranking in state.get("final_rankings", []):
-            if not ranking.get("recommended_for_interview"):
-                continue
-
+        def gen_questions(ranking: dict) -> tuple:
             cid = ranking["candidate_id"]
-            resume = self.candidates.get(cid)
-            if not resume:
-                continue
+            if cid in self.candidates:
+                resume_dict = self.candidates[cid].dict()
+            else:
+                resume_dict = self.store.get_candidate_data(cid)
+                if not resume_dict:
+                    return cid, {"error": "Resume data not found"}
 
             prompt = f"""You are a senior technical interviewer. Generate a tailored interview question set for this candidate.
 
@@ -324,7 +350,7 @@ Role being hired for:
 {state['job_description']}
 
 Candidate resume:
-{json.dumps(resume.dict(), indent=2)}
+{json.dumps(resume_dict, indent=2)}
 
 Screening evaluation:
 - Match score: {ranking.get('match_score')}/100
@@ -361,14 +387,24 @@ Return ONLY valid JSON:
 }}"""
 
             try:
-                resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=2048)
+                resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=1400)
                 questions = _parse_json_response(resp)
                 questions["candidate_id"] = cid
                 questions["rank"] = ranking["rank"]
                 questions["match_score"] = ranking.get("match_score")
-                results[cid] = questions
+                return cid, questions
             except Exception as e:
-                results[cid] = {"error": str(e)}
+                return cid, {"error": str(e)}
+
+        # Cap at top 5 recommended to keep IQ generation fast
+        recommended = recommended[:5]
+
+        results: Dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(gen_questions, r) for r in recommended]
+            for future in as_completed(futures):
+                cid, questions = future.result()
+                results[cid] = questions
 
         return {"interview_questions": results}
 

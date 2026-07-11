@@ -14,12 +14,11 @@ HTML = """
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
 
-  .container { max-width: 860px; margin: 0 auto; padding: 32px 20px; }
+  .container { max-width: 920px; margin: 0 auto; padding: 32px 20px; }
 
   h1 { font-size: 1.6rem; font-weight: 600; color: #fff; margin-bottom: 4px; }
   .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 32px; }
 
-  /* Setup card */
   .card { background: #1a1d27; border: 1px solid #2a2d3e; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
   .card h2 { font-size: 1rem; font-weight: 600; color: #a0a8ff; margin-bottom: 16px; }
   label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 6px; margin-top: 12px; }
@@ -59,6 +58,59 @@ HTML = """
   .dot.red { background: #e74c3c; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+  /* Pool badge */
+  .pool-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #1e2a3a; border: 1px solid #2a4060; border-radius: 20px;
+    padding: 4px 12px; font-size: 0.78rem; color: #5fa8ff; margin-bottom: 16px;
+  }
+  .pool-badge .count { font-weight: 700; }
+
+  /* File input */
+  .file-input-wrap {
+    background: #0f1117; border: 1px dashed #2a2d3e; border-radius: 8px;
+    padding: 12px 14px; width: 100%; color: #888; font-size: 0.85rem;
+  }
+  .file-input-wrap input[type=file] { width: 100%; color: #e0e0e0; }
+
+  /* Rankings panel */
+  #rankings-panel { display: none; }
+  .rankings-header {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;
+  }
+  .pool-stats { font-size: 0.82rem; color: #888; }
+
+  .rankings-table { width: 100%; border-collapse: collapse; }
+  .rankings-table th {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.5px;
+    color: #666; padding: 8px 12px; text-align: left; border-bottom: 1px solid #2a2d3e;
+  }
+  .rankings-table td { padding: 12px 12px; border-bottom: 1px solid #1a1d27; font-size: 0.88rem; vertical-align: middle; }
+  .rankings-table tr:last-child td { border-bottom: none; }
+  .rankings-table tr:hover td { background: #1f2233; }
+
+  .rank-num { font-weight: 700; color: #a0a8ff; font-size: 1rem; }
+  .rank-1 .rank-num { color: #ffd700; }
+  .rank-2 .rank-num { color: #c0c0c0; }
+  .rank-3 .rank-num { color: #cd7f32; }
+
+  .score-pill {
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-size: 0.78rem; font-weight: 600;
+  }
+  .score-high { background: #1a3a1a; color: #5fd48a; border: 1px solid #27ae60; }
+  .score-mid  { background: #3a3a0f; color: #ffe080; border: 1px solid #f39c12; }
+  .score-low  { background: #3a0f0f; color: #ff8080; border: 1px solid #e74c3c; }
+
+  .rec-badge {
+    font-size: 0.7rem; font-weight: 600; padding: 2px 8px;
+    border-radius: 10px; text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .rec-strong { background: #0f2a0f; color: #27ae60; border: 1px solid #27ae60; }
+  .rec-match  { background: #1e3a5f; color: #5fa8ff; border: 1px solid #3a7abf; }
+  .rec-weak   { background: #3a3a0f; color: #ffe080; border: 1px solid #f39c12; }
+  .rec-no     { background: #2a1a1a; color: #888; border: 1px solid #444; }
+
   /* Interview panel */
   #interview-panel { display: none; }
 
@@ -70,11 +122,11 @@ HTML = """
     font-size: 0.7rem; font-weight: 600; padding: 3px 10px;
     border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;
   }
-  .badge-tech { background: #1e3a5f; color: #5fa8ff; }
-  .badge-gap  { background: #3a1e1e; color: #ff8080; }
-  .badge-proj { background: #1e3a2a; color: #5fd48a; }
+  .badge-tech   { background: #1e3a5f; color: #5fa8ff; }
+  .badge-gap    { background: #3a1e1e; color: #ff8080; }
+  .badge-proj   { background: #1e3a2a; color: #5fd48a; }
   .badge-sysdes { background: #2a1e3a; color: #c080ff; }
-  .badge-beh  { background: #3a3a1e; color: #ffe080; }
+  .badge-beh    { background: #3a3a1e; color: #ffe080; }
 
   .question-box {
     background: #0f1117; border: 1px solid #2a2d3e; border-left: 3px solid #5c6aff;
@@ -82,10 +134,8 @@ HTML = """
     margin-bottom: 20px; min-height: 70px;
   }
 
-  .tts-controls { display: flex; gap: 10px; margin-bottom: 20px; }
   audio { width: 100%; border-radius: 8px; margin-bottom: 16px; }
 
-  /* Recording */
   .record-area {
     border: 2px dashed #2a2d3e; border-radius: 12px;
     padding: 28px; text-align: center; margin-bottom: 20px;
@@ -97,26 +147,23 @@ HTML = """
   .mic-icon { font-size: 2.5rem; margin-bottom: 8px; }
   .record-hint { font-size: 0.8rem; color: #888; margin-top: 8px; }
 
-  /* Timer */
   #timer { font-size: 1.4rem; font-weight: 700; color: #ff4f4f; font-variant-numeric: tabular-nums; }
 
-  /* Transcript */
   .answer-box {
     background: #0f1117; border: 1px solid #2a2d3e; border-radius: 8px;
     padding: 14px 16px; min-height: 60px; font-size: 0.9rem; line-height: 1.5;
     margin-bottom: 16px; white-space: pre-wrap; color: #ccc;
   }
 
-  /* Score */
   .eval-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
   .eval-chip {
     background: #1a1d27; border: 1px solid #2a2d3e; border-radius: 8px;
     padding: 8px 14px; font-size: 0.8rem;
   }
   .eval-chip span { font-weight: 700; color: #a0a8ff; }
-  .score-high  { border-color: #27ae60; }
-  .score-mid   { border-color: #f39c12; }
-  .score-low   { border-color: #e74c3c; }
+  .score-chip-high { border-color: #27ae60; }
+  .score-chip-mid  { border-color: #f39c12; }
+  .score-chip-low  { border-color: #e74c3c; }
 
   .hits-misses { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
   .hits-misses div { background: #0f1117; border: 1px solid #2a2d3e; border-radius: 8px; padding: 12px 14px; }
@@ -132,10 +179,10 @@ HTML = """
     display: inline-block; font-size: 1.1rem; font-weight: 700;
     padding: 10px 28px; border-radius: 8px; margin-top: 12px;
   }
-  .verdict-HIRE { background: #1a3a1a; color: #5fd48a; border: 1px solid #27ae60; }
+  .verdict-HIRE        { background: #1a3a1a; color: #5fd48a; border: 1px solid #27ae60; }
   .verdict-STRONG_HIRE { background: #0f2a0f; color: #27ae60; border: 1px solid #27ae60; }
-  .verdict-HOLD { background: #3a3a0f; color: #ffe080; border: 1px solid #f39c12; }
-  .verdict-REJECT { background: #3a0f0f; color: #ff8080; border: 1px solid #e74c3c; }
+  .verdict-HOLD        { background: #3a3a0f; color: #ffe080; border: 1px solid #f39c12; }
+  .verdict-REJECT      { background: #3a0f0f; color: #ff8080; border: 1px solid #e74c3c; }
 
   .score-overall { font-size: 2.8rem; font-weight: 800; color: #a0a8ff; }
   .score-label { font-size: 0.85rem; color: #888; }
@@ -152,8 +199,14 @@ HTML = """
   .log-a { font-size: 0.88rem; color: #ccc; margin-bottom: 6px; }
   .log-score { font-size: 0.78rem; }
   .log-score .good { color: #27ae60; } .log-score .mid { color: #f39c12; } .log-score .bad { color: #e74c3c; }
-
   #log-area { margin-top: 8px; }
+
+  .back-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.82rem; color: #666; cursor: pointer; margin-bottom: 16px;
+    background: none; border: none; padding: 0;
+  }
+  .back-link:hover { color: #a0a8ff; }
 </style>
 </head>
 <body>
@@ -167,13 +220,26 @@ HTML = """
     <span id="status-text">Ready</span>
   </div>
 
-  <!-- Setup panel -->
+  <!-- ── Setup panel ──────────────────────────────────────────────────── -->
   <div id="setup-panel">
     <div class="card">
-      <h2>Resume</h2>
-      <label>Upload PDF</label>
-      <input type="file" id="resume-file" accept=".pdf,.docx,.txt"
-        style="background:#0f1117;border:1px solid #2a2d3e;border-radius:8px;padding:8px 12px;width:100%;color:#e0e0e0;">
+      <h2>Candidate Pool</h2>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
+        <div class="pool-badge" style="margin-bottom:0;">
+          Candidates in pool: <span class="count" id="pool-count">...</span>
+        </div>
+        <div class="pool-badge" style="margin-bottom:0;" id="mongo-badge">
+          MongoDB: <span id="mongo-status">checking...</span>
+        </div>
+      </div>
+      <div id="history-links" style="display:none;font-size:0.8rem;color:#666;margin-bottom:12px;">
+        Past runs: <span id="job-history-list"></span>
+      </div>
+      <label>Add new resumes to pool (optional — leave blank to screen existing pool)</label>
+      <div class="file-input-wrap">
+        <input type="file" id="resume-file" accept=".pdf,.docx,.txt" multiple>
+      </div>
+      <div id="file-count" style="font-size:0.78rem;color:#666;margin-top:6px;"></div>
     </div>
 
     <div class="card">
@@ -197,14 +263,64 @@ Required: 1+ year production AI experience.</textarea>
 
       <div style="margin-top:20px;">
         <button class="btn btn-primary" id="screen-btn" onclick="startScreening()">
-          Run Screening Pipeline
+          Screen the Pool
         </button>
       </div>
     </div>
   </div>
 
-  <!-- Interview panel -->
+  <!-- ── Rankings panel ──────────────────────────────────────────────── -->
+  <div id="rankings-panel">
+
+    <!-- Cached-run notice (shown when fast-path reuses a previous job) -->
+    <div id="cached-notice" style="display:none;margin-bottom:14px;padding:10px 16px;
+         border-radius:8px;background:#1a1400;border:1px solid #4a3a00;
+         font-size:0.82rem;color:#c8a020;gap:10px;">
+      <span style="font-size:1rem;">&#9888;</span>
+      <span id="cached-notice-text"></span>
+    </div>
+
+    <!-- Uploaded candidates highlight card -->
+    <div id="uploaded-section" style="display:none;margin-bottom:18px;">
+      <div class="card" style="border-color:#2a5c3a;background:#0a1a10;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+          <span style="font-size:1.1rem;font-weight:700;color:#4caf50;">Your Uploaded Candidates</span>
+          <span style="font-size:0.75rem;color:#888;">Qualified for immediate interview</span>
+        </div>
+        <div id="uploaded-cards" style="display:flex;flex-direction:column;gap:10px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="rankings-header">
+        <div>
+          <h2 style="margin-bottom:4px;">Talent Pool Rankings</h2>
+          <div class="pool-stats" id="pool-stats"></div>
+        </div>
+        <button class="btn btn-sm" style="background:#1a1d27;border:1px solid #2a2d3e;color:#888;"
+          onclick="backToSetup()">New Search</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="rankings-table" id="rankings-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Candidate</th>
+              <th>Score</th>
+              <th>Match Level</th>
+              <th>Key Strengths</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="rankings-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Interview panel ─────────────────────────────────────────────── -->
   <div id="interview-panel">
+    <button class="back-link" onclick="backToRankings()">&#8592; Back to rankings</button>
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <div>
@@ -218,19 +334,16 @@ Required: 1+ year production AI experience.</textarea>
       </div>
       <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
 
-      <!-- Question -->
       <div class="question-meta">
         <span class="badge" id="q-badge">Technical</span>
         <span style="font-size:0.75rem;color:#888;" id="q-gap"></span>
       </div>
       <div class="question-box" id="question-text">Loading question...</div>
 
-      <!-- TTS audio -->
       <audio id="tts-audio" controls autoplay style="display:none;"></audio>
 
-      <!-- Recording controls -->
       <div class="record-area" id="record-area">
-        <div class="mic-icon" id="mic-icon">🎙️</div>
+        <div class="mic-icon" id="mic-icon">&#127897;&#65039;</div>
         <div id="record-label">Click to start recording your answer</div>
         <div id="timer" style="display:none;">0:00</div>
         <div class="record-hint">Press the button or use spacebar</div>
@@ -238,19 +351,17 @@ Required: 1+ year production AI experience.</textarea>
 
       <div style="display:flex;gap:10px;margin-bottom:16px;">
         <button class="btn btn-danger" id="record-btn" onclick="toggleRecording()">
-          🔴 Start Recording
+          &#128308; Start Recording
         </button>
         <button class="btn btn-success" id="submit-btn" onclick="submitAnswer()" disabled>
-          Submit Answer →
+          Submit Answer &rarr;
         </button>
       </div>
 
-      <!-- Answer transcription -->
       <div id="answer-section" style="display:none;">
         <label>Transcription</label>
         <div class="answer-box" id="answer-text"></div>
 
-        <!-- Evaluation -->
         <div id="eval-section" style="display:none;">
           <div class="eval-row" id="eval-chips"></div>
           <div class="hits-misses">
@@ -259,13 +370,12 @@ Required: 1+ year production AI experience.</textarea>
           </div>
           <div style="display:flex;gap:10px;">
             <button class="btn btn-primary" id="next-btn" onclick="nextQuestion()">
-              Next Question →
+              Next Question &rarr;
             </button>
           </div>
         </div>
       </div>
 
-      <!-- Log -->
       <div id="log-area" style="display:none;">
         <div style="font-size:0.75rem;color:#888;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">
           Answered so far
@@ -275,8 +385,9 @@ Required: 1+ year production AI experience.</textarea>
     </div>
   </div>
 
-  <!-- Report panel -->
+  <!-- ── Report panel ────────────────────────────────────────────────── -->
   <div id="report-panel">
+    <button class="back-link" onclick="backToRankings()">&#8592; Back to rankings</button>
     <div class="card">
       <div class="report-header">
         <div style="font-size:0.8rem;color:#888;margin-bottom:4px;">Interview Complete</div>
@@ -307,8 +418,9 @@ Required: 1+ year production AI experience.</textarea>
 </div>
 
 <script>
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── Global state ──────────────────────────────────────────────────────────────
 let sessionId = null;
+let rankingsData = null;  // last screen response
 let ws = null;
 let mediaRecorder = null;
 let audioChunks = [];
@@ -323,34 +435,54 @@ let transcript = [];
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function setStatus(text, color) {
   document.getElementById('status-text').textContent = text;
-  const dot = document.getElementById('status-dot');
-  dot.className = 'dot ' + (color || '');
+  document.getElementById('status-dot').className = 'dot ' + (color || '');
+}
+
+function showPanel(id) {
+  ['setup-panel','rankings-panel','interview-panel','report-panel'].forEach(p => {
+    document.getElementById(p).style.display = p === id ? 'block' : 'none';
+  });
 }
 
 function badge(category) {
   const map = {
-    technical_depth: ['Technical Depth', 'badge-tech'],
-    gap_probing:     ['Gap Probing',     'badge-gap'],
-    project_specific:['Project',         'badge-proj'],
-    system_design:   ['System Design',   'badge-sysdes'],
-    behavioral:      ['Behavioral',      'badge-beh'],
+    technical_depth:  ['Technical Depth', 'badge-tech'],
+    gap_probing:      ['Gap Probing',     'badge-gap'],
+    project_specific: ['Project',         'badge-proj'],
+    system_design:    ['System Design',   'badge-sysdes'],
+    behavioral:       ['Behavioral',      'badge-beh'],
   };
   return map[category] || [category, ''];
 }
 
+function scoreClass(s) { return s >= 70 ? 'score-high' : s >= 45 ? 'score-mid' : 'score-low'; }
+function chipClass(s)  { return s >= 7  ? 'score-chip-high' : s >= 4 ? 'score-chip-mid' : 'score-chip-low'; }
+
+function recBadge(rec) {
+  const map = {
+    STRONG_MATCH:  ['STRONG MATCH', 'rec-strong'],
+    MATCH:         ['MATCH',        'rec-match'],
+    WEAK_MATCH:    ['WEAK MATCH',   'rec-weak'],
+    NOT_QUALIFIED: ['NOT QUALIFIED','rec-no'],
+  };
+  return map[rec] || [rec, 'rec-no'];
+}
+
 // ── Screening ─────────────────────────────────────────────────────────────────
 async function startScreening() {
-  const file = document.getElementById('resume-file').files[0];
-  if (!file) { alert('Please upload a resume file.'); return; }
-
   const jd = document.getElementById('jd-input').value.trim();
   if (!jd) { alert('Please enter a job description.'); return; }
 
-  setStatus('Parsing resume...', 'yellow');
+  const fileCount = document.getElementById('resume-file').files.length;
+  const msg = fileCount > 0
+    ? `Parsing ${fileCount} resume${fileCount > 1 ? 's' : ''} + running screening pipeline...`
+    : 'Running screening pipeline...';
+  setStatus(msg, 'yellow');
   document.getElementById('screen-btn').disabled = true;
 
   const formData = new FormData();
-  formData.append('resume', file);
+  const files = document.getElementById('resume-file').files;
+  for (let i = 0; i < files.length; i++) formData.append('resumes', files[i]);
   formData.append('jd', jd);
   formData.append('skills', document.getElementById('skills-input').value);
   formData.append('max_follow_ups', document.getElementById('followups-select').value);
@@ -359,39 +491,187 @@ async function startScreening() {
     const resp = await fetch('/api/screen', { method: 'POST', body: formData });
     const data = await resp.json();
 
-    if (data.error) { setStatus('Error: ' + data.error, 'red'); return; }
+    document.getElementById('screen-btn').disabled = false;
 
-    sessionId = data.session_id;
-    setStatus('Screening complete — starting interview', 'green');
+    if (data.error) {
+      setStatus('Error: ' + data.error, 'red');
+      console.error(data.detail);
+      return;
+    }
 
-    // Switch to interview UI
-    document.getElementById('setup-panel').style.display = 'none';
-    document.getElementById('interview-panel').style.display = 'block';
-
-    document.getElementById('candidate-name').textContent = data.candidate_name;
-    document.getElementById('interview-meta').textContent =
-      `Match score: ${data.match_score}/100 · ${data.total_questions} questions`;
-
-    totalQuestions = data.total_questions;
-    connectWS();
+    rankingsData = data;
+    showRankings(data);
+    setStatus('Screening complete — ' + data.rankings.length + ' candidates evaluated', 'green');
   } catch (e) {
     setStatus('Error: ' + e.message, 'red');
     document.getElementById('screen-btn').disabled = false;
   }
 }
 
+// ── Rankings display ──────────────────────────────────────────────────────────
+function showRankings(data) {
+  showPanel('rankings-panel');
+  const sessions  = data.sessions || {};
+  const uploadSet = new Set(data.uploaded_cids || []);
+  const recommended = Object.keys(sessions).length;
+
+  document.getElementById('pool-stats').textContent =
+    `Pool size: ${data.pool_size} candidates · Evaluated: ${data.rankings.length} · Recommended for interview: ${recommended}`;
+
+  // ── Cached-run notice ──
+  const notice = document.getElementById('cached-notice');
+  if (data.reused_job_id) {
+    const d = data.reused_job_date ? new Date(data.reused_job_date).toLocaleString() : 'previous run';
+    let msg = `Talent pool rankings loaded from cached run (${d}). Only newly uploaded resumes were re-evaluated.`;
+    if (data.pool_changed) {
+      msg += ` Pool size changed: ${data.old_pool_size} → ${data.pool_size} candidates. Re-run without uploads to refresh all rankings.`;
+    }
+    document.getElementById('cached-notice-text').textContent = msg;
+    notice.style.display = 'block';
+  } else {
+    notice.style.display = 'none';
+  }
+
+  // ── Uploaded candidates highlight section ──
+  const uploadedWithSession = (data.rankings || []).filter(r =>
+    uploadSet.has(r.candidate_id) && sessions[r.candidate_id]
+  );
+  const uploadedSection = document.getElementById('uploaded-section');
+  if (uploadedWithSession.length > 0) {
+    uploadedSection.style.display = '';
+    const cards = document.getElementById('uploaded-cards');
+    cards.innerHTML = '';
+    uploadedWithSession.forEach(r => {
+      const sess  = sessions[r.candidate_id];
+      const sc    = r.match_score != null ? Math.round(r.match_score) : '?';
+      const level = r.match_level || '—';
+      const levelColor = level === 'Strong Fit' ? '#4caf50' : '#ff9800';
+      const strengths = (r.strengths || []).slice(0, 2).join('; ') || '—';
+      cards.innerHTML += `
+        <div style="background:#0d1f14;border:1px solid #2a5c3a;border-radius:8px;
+                    padding:14px 18px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:160px;">
+            <div style="font-weight:700;font-size:0.95rem;">${esc(r.candidate_name || r.candidate_id)}</div>
+            <div style="font-size:0.72rem;color:#666;">${esc(r.candidate_id)}</div>
+          </div>
+          <span class="score-pill ${scoreClass(sc)}">${sc}/100</span>
+          <span style="color:${levelColor};font-weight:600;font-size:0.85rem;">${esc(level)}</span>
+          <div style="font-size:0.8rem;color:#aaa;flex:2;min-width:140px;">${esc(strengths)}</div>
+          <button class="btn btn-primary btn-sm"
+            style="background:#1a7a3a;border-color:#2a9a4a;font-weight:700;white-space:nowrap;"
+            onclick="startInterview('${sess.session_id}','${esc(r.candidate_name)}',${r.match_score||0},${sess.total_questions})">
+            Interview Now →
+          </button>
+        </div>`;
+    });
+  } else {
+    uploadedSection.style.display = 'none';
+  }
+
+  // ── Full talent pool table ──
+  const tbody = document.getElementById('rankings-body');
+  tbody.innerHTML = '';
+
+  (data.rankings || []).forEach(r => {
+    const sess    = sessions[r.candidate_id];
+    const sc      = r.match_score != null ? Math.round(r.match_score) : '?';
+    const level   = r.match_level || '—';
+    const [recLabel, recCls] = recBadge(r.overall_recommendation);
+    const strengths = (r.strengths || []).slice(0, 2).join('; ') || '—';
+    const rankCls = r.rank <= 3 ? `rank-${r.rank}` : '';
+    const scCls   = scoreClass(sc);
+    const isNew   = uploadSet.has(r.candidate_id);
+
+    let actionCell;
+    if (sess) {
+      const btnStyle = isNew ? 'background:#1a7a3a;border-color:#2a9a4a;font-weight:700;' : '';
+      const btnLabel = isNew ? 'Interview Now →' : 'Interview';
+      actionCell = `<button class="btn btn-primary btn-sm" style="${btnStyle}"
+           onclick="startInterview('${sess.session_id}','${esc(r.candidate_name)}',${r.match_score||0},${sess.total_questions})">
+           ${btnLabel}</button>`;
+    } else {
+      actionCell = `<span style="color:#555;font-size:0.8rem;">—</span>`;
+    }
+
+    const newBadge = isNew
+      ? `<span style="font-size:0.65rem;font-weight:700;padding:2px 6px;border-radius:8px;
+                      background:#1e3a5f;color:#5fa8ff;border:1px solid #3a7abf;margin-left:6px;">NEW</span>`
+      : '';
+
+    tbody.innerHTML += `
+      <tr class="${rankCls}">
+        <td><span class="rank-num">${r.rank}</span></td>
+        <td>
+          <div style="font-weight:600;">${esc(r.candidate_name || r.candidate_id)}${newBadge}</div>
+          <div style="font-size:0.75rem;color:#666;">${esc(r.candidate_id)}</div>
+        </td>
+        <td><span class="score-pill ${scCls}">${sc}/100</span></td>
+        <td><span class="rec-badge ${recCls}">${esc(level)}</span></td>
+        <td style="font-size:0.8rem;color:#aaa;max-width:220px;">${esc(strengths)}</td>
+        <td>${actionCell}</td>
+      </tr>`;
+  });
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function backToSetup() {
+  showPanel('setup-panel');
+  fetchPoolCount();
+  setStatus('Ready', '');
+}
+
+function backToRankings() {
+  if (ws) { ws.close(); ws = null; }
+  if (rankingsData) {
+    showRankings(rankingsData);
+    setStatus('Screening complete', 'green');
+  } else {
+    showPanel('setup-panel');
+  }
+  transcript = [];
+}
+
+// ── Start interview for a specific candidate ──────────────────────────────────
+function startInterview(sid, candidateName, matchScore, totalQ) {
+  sessionId = sid;
+  totalQuestions = totalQ;
+  transcript = [];
+
+  showPanel('interview-panel');
+  document.getElementById('candidate-name').textContent = candidateName;
+  document.getElementById('interview-meta').textContent =
+    `Match score: ${Math.round(matchScore)}/100 · ${totalQ} questions`;
+
+  // Reset recording UI
+  document.getElementById('answer-section').style.display = 'none';
+  document.getElementById('eval-section').style.display = 'none';
+  document.getElementById('log-area').style.display = 'none';
+  document.getElementById('log-entries').innerHTML = '';
+  document.getElementById('submit-btn').disabled = true;
+  document.getElementById('record-btn').textContent = '&#128308; Start Recording';
+  document.getElementById('record-area').className = 'record-area';
+  document.getElementById('tts-audio').style.display = 'none';
+  audioChunks = [];
+
+  connectWS();
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
+  if (ws) { ws.close(); }
   ws = new WebSocket(`ws://${location.host}/ws/${sessionId}`);
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'question')   handleQuestion(msg);
-    if (msg.type === 'tts_audio')  playTTS(msg.audio_b64);
-    if (msg.type === 'transcription') handleTranscription(msg.text);
-    if (msg.type === 'evaluation') handleEvaluation(msg);
-    if (msg.type === 'report')     handleReport(msg);
-    if (msg.type === 'status')     setStatus(msg.text, msg.color || '');
+    if (msg.type === 'question')     handleQuestion(msg);
+    if (msg.type === 'tts_audio')    playTTS(msg.audio_b64);
+    if (msg.type === 'transcription')handleTranscription(msg.text);
+    if (msg.type === 'evaluation')   handleEvaluation(msg);
+    if (msg.type === 'report')       handleReport(msg);
+    if (msg.type === 'status')       setStatus(msg.text, msg.color || '');
   };
 
   ws.onopen = () => {
@@ -416,11 +696,10 @@ function handleQuestion(msg) {
   document.getElementById('q-gap').textContent = msg.gap ? `Gap: ${msg.gap}` : '';
   document.getElementById('question-text').textContent = msg.question;
 
-  // Reset UI
   document.getElementById('answer-section').style.display = 'none';
   document.getElementById('eval-section').style.display = 'none';
   document.getElementById('submit-btn').disabled = true;
-  document.getElementById('record-btn').textContent = '🔴 Start Recording';
+  document.getElementById('record-btn').textContent = '&#128308; Start Recording';
   document.getElementById('record-area').className = 'record-area';
   document.getElementById('mic-icon').textContent = '🎙️';
   document.getElementById('record-label').textContent = 'Click to start recording your answer';
@@ -439,11 +718,7 @@ function playTTS(b64) {
 
 // ── Recording ─────────────────────────────────────────────────────────────────
 async function toggleRecording() {
-  if (isRecording) {
-    stopRecording();
-  } else {
-    await startRecording();
-  }
+  if (isRecording) stopRecording(); else await startRecording();
 }
 
 async function startRecording() {
@@ -461,7 +736,7 @@ async function startRecording() {
     mediaRecorder.start(250);
     isRecording = true;
 
-    document.getElementById('record-btn').textContent = '⏹ Stop Recording';
+    document.getElementById('record-btn').textContent = '&#9209; Stop Recording';
     document.getElementById('record-area').className = 'record-area recording';
     document.getElementById('mic-icon').textContent = '🔴';
     document.getElementById('record-label').textContent = 'Recording... speak your answer';
@@ -474,19 +749,16 @@ async function startRecording() {
       const s = String(timerSeconds % 60).padStart(2, '0');
       document.getElementById('timer').textContent = `${m}:${s}`;
     }, 1000);
-
   } catch (e) {
     setStatus('Mic access denied: ' + e.message, 'red');
   }
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
   isRecording = false;
   clearInterval(timerInterval);
-  document.getElementById('record-btn').textContent = '🔴 Record Again';
+  document.getElementById('record-btn').textContent = '&#128308; Record Again';
   document.getElementById('record-area').className = 'record-area done';
   document.getElementById('mic-icon').textContent = '✅';
   document.getElementById('record-label').textContent = 'Recording saved — submit when ready';
@@ -524,13 +796,12 @@ async function submitAnswer() {
   document.getElementById('answer-section').style.display = 'block';
   document.getElementById('answer-text').textContent = 'Processing...';
 
-  // Convert WebM → WAV in browser so server can read it without ffmpeg
   const webmBlob = new Blob(audioChunks, { type: 'audio/webm' });
   let uploadBlob = webmBlob;
   let uploadName = 'answer.webm';
   try {
     const arrayBuf = await webmBlob.arrayBuffer();
-    const actx = new AudioContext();  // native rate — Whisper resamples internally
+    const actx = new AudioContext();
     const audioBuf = await actx.decodeAudioData(arrayBuf);
     await actx.close();
     uploadBlob = encodeWav(audioBuf);
@@ -549,7 +820,6 @@ async function submitAnswer() {
   formData.append('session_id', sessionId);
   formData.append('question_idx', questionIdx);
 
-  // Pulse the status every 5s so user knows it's alive
   let elapsed = 0;
   const pulse = setInterval(() => {
     elapsed += 5;
@@ -565,7 +835,6 @@ async function submitAnswer() {
     clearInterval(pulse);
     setStatus('Error: ' + e.message, 'red');
   }
-  // transcription + evaluation arrive via WS
 }
 
 function handleTranscription(text) {
@@ -575,35 +844,33 @@ function handleTranscription(text) {
 
 function handleEvaluation(msg) {
   const ev = msg.evaluation;
-  const scoreClass = ev.score >= 7 ? 'score-high' : ev.score >= 4 ? 'score-mid' : 'score-low';
+  const cc = chipClass(ev.score);
 
   document.getElementById('eval-chips').innerHTML = `
-    <div class="eval-chip ${scoreClass}">Score <span>${ev.score}/10</span></div>
+    <div class="eval-chip ${cc}">Score <span>${ev.score}/10</span></div>
     <div class="eval-chip">Depth <span>${ev.depth}</span></div>
     ${ev.needs_follow_up ? '<div class="eval-chip" style="border-color:#f39c12;">Follow-up queued</div>' : ''}
   `;
 
-  document.getElementById('hits-list').innerHTML = (ev.hits || []).map(h => `<li>${h}</li>`).join('');
-  document.getElementById('misses-list').innerHTML = (ev.misses || []).map(m => `<li>${m}</li>`).join('');
+  document.getElementById('hits-list').innerHTML = (ev.hits || []).map(h => `<li>${esc(h)}</li>`).join('');
+  document.getElementById('misses-list').innerHTML = (ev.misses || []).map(m => `<li>${esc(m)}</li>`).join('');
   document.getElementById('eval-section').style.display = 'block';
 
-  // Add to log
   transcript.push({ question: currentQuestion.question, answer: document.getElementById('answer-text').textContent, score: ev.score });
   updateLog();
 
-  // Change next button label if follow-up
   document.getElementById('next-btn').textContent = ev.needs_follow_up ? 'Answer Follow-up →' : 'Next Question →';
   setStatus(`Score: ${ev.score}/10 · ${ev.depth}`, 'green');
 }
 
 function updateLog() {
-  if (transcript.length === 0) return;
+  if (!transcript.length) return;
   document.getElementById('log-area').style.display = 'block';
   document.getElementById('log-entries').innerHTML = transcript.map((t, i) => {
     const cls = t.score >= 7 ? 'good' : t.score >= 4 ? 'mid' : 'bad';
     return `<div class="log-entry">
-      <div class="log-q">Q${i+1}: ${t.question.slice(0,90)}...</div>
-      <div class="log-a">${t.answer.slice(0,120)}...</div>
+      <div class="log-q">Q${i+1}: ${esc(t.question.slice(0,90))}...</div>
+      <div class="log-a">${esc(t.answer.slice(0,120))}...</div>
       <div class="log-score"><span class="${cls}">Score: ${t.score}/10</span></div>
     </div>`;
   }).join('');
@@ -619,29 +886,28 @@ function nextQuestion() {
 // ── Final report ──────────────────────────────────────────────────────────────
 function handleReport(msg) {
   const r = msg.report;
-  document.getElementById('interview-panel').style.display = 'none';
-  document.getElementById('report-panel').style.display = 'block';
+  showPanel('report-panel');
 
   document.getElementById('report-score').textContent = r.overall_score?.toFixed(1);
   const v = document.getElementById('report-verdict');
-  v.textContent = r.verdict?.replace('_', ' ');
+  v.textContent = (r.verdict || '').replace('_', ' ');
   v.className = 'verdict verdict-' + r.verdict;
   document.getElementById('report-summary').textContent = r.summary;
   document.getElementById('report-rec').textContent = r.recommendation;
 
   const cats = r.category_scores || {};
-  document.getElementById('cat-scores').innerHTML = Object.entries(cats).map(([k, v]) =>
-    `<div class="cat-score"><div class="name">${k.replace('_',' ')}</div><div class="val">${v?.toFixed(1)}</div></div>`
+  document.getElementById('cat-scores').innerHTML = Object.entries(cats).map(([k, val]) =>
+    `<div class="cat-score"><div class="name">${k.replace('_',' ')}</div><div class="val">${val?.toFixed(1)}</div></div>`
   ).join('');
 
-  document.getElementById('report-strengths').innerHTML = (r.top_strengths || []).map(s => `<li>${s}</li>`).join('');
-  document.getElementById('report-concerns').innerHTML = (r.key_concerns || []).map(c => `<li>${c}</li>`).join('');
+  document.getElementById('report-strengths').innerHTML = (r.top_strengths || []).map(s => `<li>${esc(s)}</li>`).join('');
+  document.getElementById('report-concerns').innerHTML = (r.key_concerns || []).map(c => `<li>${esc(c)}</li>`).join('');
 
   document.getElementById('report-log').innerHTML = transcript.map((t, i) => {
     const cls = t.score >= 7 ? 'good' : t.score >= 4 ? 'mid' : 'bad';
     return `<div class="log-entry">
-      <div class="log-q">Q${i+1}: ${t.question}</div>
-      <div class="log-a">${t.answer}</div>
+      <div class="log-q">Q${i+1}: ${esc(t.question)}</div>
+      <div class="log-a">${esc(t.answer)}</div>
       <div class="log-score"><span class="${cls}">Score: ${t.score}/10</span></div>
     </div>`;
   }).join('');
@@ -649,13 +915,74 @@ function handleReport(msg) {
   setStatus('Interview complete', 'green');
 }
 
-// Spacebar shortcut
+// Spacebar shortcut for recording
 document.addEventListener('keydown', e => {
   if (e.code === 'Space' && document.getElementById('interview-panel').style.display !== 'none') {
     e.preventDefault();
     toggleRecording();
   }
 });
+
+// Show selected file count
+document.getElementById('resume-file').addEventListener('change', function() {
+  const n = this.files.length;
+  const el = document.getElementById('file-count');
+  el.textContent = n > 0 ? `${n} file${n > 1 ? 's' : ''} selected` : '';
+});
+
+// Load pool count + mongo status on page load
+async function fetchPoolCount() {
+  try {
+    const r = await fetch('/api/pool-count');
+    const d = await r.json();
+    document.getElementById('pool-count').textContent = d.count;
+    const ms = document.getElementById('mongo-status');
+    if (d.mongo) {
+      ms.textContent = 'connected';
+      ms.style.color = '#27ae60';
+      loadJobHistory();
+    } else {
+      ms.textContent = 'not running';
+      ms.style.color = '#e74c3c';
+    }
+  } catch (e) {
+    document.getElementById('pool-count').textContent = '?';
+  }
+}
+
+async function loadJobHistory() {
+  try {
+    const r = await fetch('/api/jobs');
+    const d = await r.json();
+    if (!d.jobs || !d.jobs.length) return;
+    document.getElementById('history-links').style.display = 'block';
+    document.getElementById('job-history-list').innerHTML = d.jobs.slice(0, 5).map(j => {
+      const date = new Date(j.run_at).toLocaleString();
+      const jd = (j.job_description || '').slice(0, 40);
+      return `<a href="#" style="color:#5fa8ff;margin-right:12px;"
+        onclick="loadPastJob('${j._id}');return false;"
+        title="${esc(j.job_description)}">${esc(jd)}… (${date})</a>`;
+    }).join('');
+  } catch (e) {}
+}
+
+async function loadPastJob(jobId) {
+  setStatus('Loading past screening run...', 'yellow');
+  try {
+    const r = await fetch('/api/jobs/' + jobId);
+    const data = await r.json();
+    if (data.error) { setStatus('Error: ' + data.error, 'red'); return; }
+    // Re-show rankings without sessions (read-only view, no interview buttons)
+    rankingsData = { rankings: data.rankings, sessions: {}, pool_size: data.pool_size };
+    showRankings(rankingsData);
+    setStatus('Past run loaded — ' + new Date(data.run_at).toLocaleString(), 'green');
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'red');
+  }
+}
+
+fetchPoolCount();
+showPanel('setup-panel');
 </script>
 </body>
 </html>
