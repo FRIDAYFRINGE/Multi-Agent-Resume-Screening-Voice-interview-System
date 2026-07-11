@@ -23,6 +23,11 @@ load_dotenv()
 
 from ui import HTML  # noqa: E402  (imported after dotenv)
 
+# ── STT provider ───────────────────────────────────────────────────────────────
+# "local" → faster-whisper large-v3  (free, no API key, slow on CPU)
+# "groq"  → Groq cloud Whisper large-v3  (free tier, fast, needs GROQ_API_KEY in .env)
+STT_PROVIDER = "local"
+
 app = FastAPI(title="AI Interview Assistant")
 
 # ── In-memory session store ────────────────────────────────────────────────────
@@ -125,14 +130,7 @@ async def submit_answer(
             tmp.write(await audio.read())
             audio_path = tmp.name
 
-        # Transcribe
-        from voice_io import SpeechToText
-        stt = sess.get("stt")
-        if not stt:
-            stt = SpeechToText(model_size="large-v3")
-            sess["stt"] = stt
-
-        # initial_prompt primes vocabulary — add question text so Whisper expects domain terms
+        # Build domain vocabulary prompt (used by both providers)
         q_text = sess["question_queue"][sess["current_idx"]].get("question", "")
         TECH_PROMPT = (
             "JD parsing, job description, routing logic, deterministic routing, "
@@ -141,16 +139,31 @@ async def submit_answer(
             "dense embeddings, Reciprocal Rank Fusion, RRF, reranking, chunking, "
             "PyTorch, FastAPI, LoRA, QLoRA, RLHF, fine-tuning, vector database, "
             "cosine similarity, LLM, transformer, hyperparameter, agentic pipeline, "
-            "end-to-end latency, throughput, Docker, CI/CD. "
-            f"Question: {q_text}"
+            f"end-to-end latency, throughput, Docker, CI/CD. Question: {q_text}"
         )
-        segments, _ = stt.model.transcribe(
-            audio_path, language="en", beam_size=5,
-            initial_prompt=TECH_PROMPT, vad_filter=True,
-            condition_on_previous_text=False,
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        os.unlink(audio_path)
+
+        # Transcribe — provider selected by STT_PROVIDER
+        if STT_PROVIDER == "groq":
+            from voice_io import GroqSTT
+            stt = sess.get("stt")
+            if not stt:
+                stt = GroqSTT()
+                sess["stt"] = stt
+            text = stt.transcribe_file(audio_path, prompt=TECH_PROMPT)
+            os.unlink(audio_path)
+        else:
+            from voice_io import SpeechToText
+            stt = sess.get("stt")
+            if not stt:
+                stt = SpeechToText(model_size="large-v3")
+                sess["stt"] = stt
+            segments, _ = stt.model.transcribe(
+                audio_path, language="en", beam_size=5,
+                initial_prompt=TECH_PROMPT, vad_filter=True,
+                condition_on_previous_text=False,
+            )
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+            os.unlink(audio_path)
 
         # Push raw transcription — evaluator LLM handles STT noise during scoring
         if ws_conn:

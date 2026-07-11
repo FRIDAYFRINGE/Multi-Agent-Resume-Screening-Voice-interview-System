@@ -1,7 +1,10 @@
 """
 Voice I/O
-  TTS : edge-tts  (Microsoft neural TTS — free, no API key, natural voice)
-  STT : faster-whisper  (local Whisper — free, runs on CPU/GPU)
+  TTS : edge-tts      (Microsoft neural TTS — free, no API key, natural voice)
+  STT : faster-whisper (local Whisper — free, runs on CPU/GPU)
+       GroqSTT         (Groq cloud Whisper large-v3 — free tier, ~20x faster than CPU)
+
+Switch between STT providers via STT_PROVIDER in interview_app.py.
 """
 import sys
 import os
@@ -128,3 +131,39 @@ class SpeechToText:
         print("[STT] Transcribing...")
         text = self.transcribe(audio)
         return text
+
+
+# ─── Groq Cloud STT ───────────────────────────────────────────────────────────
+
+class GroqSTT:
+    """
+    Cloud STT via Groq's Whisper large-v3 API.
+    Free tier: 28,800 audio seconds/day (~8 hours).
+    ~20x faster than local CPU inference for the same model.
+    Requires GROQ_API_KEY in .env  →  https://console.groq.com/keys
+    """
+
+    API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+    def __init__(self, model: str = "whisper-large-v3"):
+        self.model = model
+        self.api_key = os.getenv("GROQ_API_KEY", "")
+        if not self.api_key:
+            raise ValueError("GROQ_API_KEY not set — add it to .env or set STT_PROVIDER='local'")
+        print(f"[STT] Groq cloud Whisper '{model}' ready.")
+
+    def transcribe_file(self, audio_path: str, prompt: str = "") -> str:
+        """Send audio file to Groq and return transcript text."""
+        import requests
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        data = {"model": self.model, "language": "en", "response_format": "text"}
+        if prompt:
+            data["prompt"] = prompt[:224]  # Groq caps prompt at 224 tokens
+        with open(audio_path, "rb") as f:
+            resp = requests.post(
+                self.API_URL, headers=headers,
+                files={"file": (os.path.basename(audio_path), f, "audio/wav")},
+                data=data, timeout=60,
+            )
+        resp.raise_for_status()
+        return (resp.text or "").strip()
