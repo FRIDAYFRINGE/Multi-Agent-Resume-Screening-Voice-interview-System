@@ -26,7 +26,7 @@ from ui import HTML  # noqa: E402  (imported after dotenv)
 # ── STT provider ───────────────────────────────────────────────────────────────
 # "local" → faster-whisper large-v3  (free, no API key, slow on CPU)
 # "groq"  → Groq cloud Whisper large-v3  (free tier, fast, needs GROQ_API_KEY in .env)
-STT_PROVIDER = "local"
+STT_PROVIDER = "groq"
 
 app = FastAPI(title="AI Interview Assistant")
 

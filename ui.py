@@ -522,7 +522,7 @@ async function submitAnswer() {
   setStatus('Processing audio...', 'yellow');
   document.getElementById('submit-btn').disabled = true;
   document.getElementById('answer-section').style.display = 'block';
-  document.getElementById('answer-text').textContent = 'Transcribing...';
+  document.getElementById('answer-text').textContent = 'Processing...';
 
   // Convert WebM → WAV in browser so server can read it without ffmpeg
   const webmBlob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -539,16 +539,32 @@ async function submitAnswer() {
     console.warn('WAV conversion failed, sending raw webm:', e);
   }
 
-  setStatus('Transcribing...', 'yellow');
+  const durationSec = timerSeconds;
+  const estSec = Math.max(10, Math.round(durationSec * 1.5));
+  setStatus(`Uploading & transcribing (~${estSec}s for ${durationSec}s audio)...`, 'yellow');
+  document.getElementById('answer-text').textContent = `Transcribing ${durationSec}s of audio — please wait...`;
+
   const formData = new FormData();
   formData.append('audio', uploadBlob, uploadName);
   formData.append('session_id', sessionId);
   formData.append('question_idx', questionIdx);
 
-  const resp = await fetch('/api/submit-answer', { method: 'POST', body: formData });
-  const data = await resp.json();
+  // Pulse the status every 5s so user knows it's alive
+  let elapsed = 0;
+  const pulse = setInterval(() => {
+    elapsed += 5;
+    setStatus(`Transcribing... (${elapsed}s elapsed, audio was ${durationSec}s)`, 'yellow');
+  }, 5000);
 
-  if (data.error) { setStatus('Error: ' + data.error, 'red'); return; }
+  try {
+    const resp = await fetch('/api/submit-answer', { method: 'POST', body: formData });
+    clearInterval(pulse);
+    const data = await resp.json();
+    if (data.error) { setStatus('Error: ' + data.error, 'red'); return; }
+  } catch (e) {
+    clearInterval(pulse);
+    setStatus('Error: ' + e.message, 'red');
+  }
   // transcription + evaluation arrive via WS
 }
 
