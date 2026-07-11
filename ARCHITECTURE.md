@@ -3,10 +3,11 @@
 ## Overview
 
 End-to-end multi-agent system for resume screening and live voice interviews.
-Accepts raw resume files, structures them into JSON, embeds into ChromaDB, runs
-a 6-node LangGraph screening pipeline, then hands off recommended candidates to
-a 7-node LangGraph interview simulator with real-time TTS/STT via a FastAPI
-WebSocket UI.
+Accepts raw resume files (single or batch), structures them into JSON, deduplicates
+by filename + content similarity, embeds into ChromaDB, runs a 6-node LangGraph
+screening pipeline with full-pool evaluation and parallel LLM calls, persists all
+results to MongoDB, then hands off recommended candidates to a 7-node LangGraph
+interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 
 ---
 
@@ -16,7 +17,7 @@ WebSocket UI.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          INGESTION LAYER                                │
 │                                                                         │
-│   resume.pdf / .docx / .txt                                             │
+│   resume.pdf / .docx / .txt  (one or many via UI)                      │
 │          │                                                              │
 │          ▼                                                              │
 │   ┌─────────────────┐                                                   │
@@ -29,46 +30,31 @@ WebSocket UI.
 │   ┌──────────────────────┐                                              │
 │   │  OpenRouterClient    │  POST /chat/completions                      │
 │   │  (openrouter_        │  Model: deepseek/deepseek-v4-flash           │
-│   │   client.py)         │  Prompt: structured extraction prompt        │
-│   │                      │  → JSON string                               │
-│   │  extract_resume_     │                                              │
-│   │  from_text()         │  _dict_to_resume() maps raw dict →          │
-│   └──────────┬───────────┘  nested dataclass hierarchy                 │
+│   │   client.py)         │  → Resume dataclass (JSON)                  │
+│   └──────────┬───────────┘                                              │
 │              │                                                          │
 │              ▼                                                          │
 │   ┌──────────────────────────────────────────────────────────┐         │
-│   │  Resume (dataclass)   schemas.py                         │         │
+│   │  Candidate ID Resolution  (database.py)                  │         │
 │   │                                                          │         │
-│   │  contact_info: ContactInfo                               │         │
-│   │    name, email, phone, address, city, state, country     │         │
-│   │    zip_code, linkedin, github, portfolio, website        │         │
+│   │  email → base_id (slug from email local-part)            │         │
+│   │  base_id + sub_id → chroma_id  (e.g. john_doe_2)        │         │
+│   │  sub_id source: MongoDB latest_sub_id → +1               │         │
+│   │  doc_key: email if available, else base_id               │         │
 │   │                                                          │         │
-│   │  professional_summary: str                               │         │
-│   │                                                          │         │
-│   │  skills: List[Skill]                                     │         │
-│   │    category, skills[]                                    │         │
-│   │                                                          │         │
-│   │  experience: List[Experience]                            │         │
-│   │    company, position, start_date, end_date,              │         │
-│   │    employment_type, location, description,               │         │
-│   │    achievements[], technologies[]                        │         │
-│   │                                                          │         │
-│   │  education: List[Education]                              │         │
-│   │    institution, degree, field_of_study,                  │         │
-│   │    start_date, end_date, gpa, activities                 │         │
-│   │                                                          │         │
-│   │  certifications: List[Certification]                     │         │
-│   │    title, issuer, date_obtained, expiration, url         │         │
-│   │                                                          │         │
-│   │  projects: List[Project]                                 │         │
-│   │    title, description, technologies[], url               │         │
-│   │                                                          │         │
-│   │  languages, publications, volunteer_experience,          │         │
-│   │  awards_recognition, metadata                            │         │
-│   └──────────────────────────────────────────────────────────┘         │
+│   │  Filename deduplication (before sub_id increment):       │         │
+│   │    find_resume_by_filename(doc_key, filename)            │         │
+│   │    ┌─ match found ──────────────────────────────┐        │         │
+│   │    │  Jaccard similarity ≥ 90%  → SKIP          │        │         │
+│   │    │  (same resume re-uploaded, reuse chroma_id) │        │         │
+│   │    │  Jaccard similarity < 90%  → OVERWRITE      │        │         │
+│   │    │  (updated resume, overwrite same sub_id)    │        │         │
+│   │    └─ no match ──────────────────────────────────┘        │         │
+│   │       new filename → new sub_id → new chroma_id           │         │
+│   └──────────────────────────────────────────────────┘         │
 └─────────────────────────────────────────────────────────────────────────┘
                               │
-                              │ Resume dataclass
+                              │ Resume dataclass + chroma_id
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         VECTOR STORE LAYER                              │
@@ -81,19 +67,51 @@ WebSocket UI.
 │   │  Distance: cosine similarity  (hnsw:space=cosine)        │         │
 │   │  Collection: "candidates"                                │         │
 │   │                                                          │         │
-│   │  _resume_to_text() flattens Resume → single string:      │         │
-│   │    summary + all skills + positions + descriptions +     │         │
-│   │    achievements + technologies + degrees + cert titles   │         │
-│   │    + project descriptions                                │         │
-│   │                                                          │         │
 │   │  Stored per document:                                    │         │
-│   │    id       → candidate_id (str)                         │         │
-│   │    document → flattened resume text  (embedded)          │         │
-│   │    metadata → {name, email, skills_flat}                 │         │
+│   │    id        → chroma_id  (e.g. john_doe_2)             │         │
+│   │    document  → flattened resume text  (embedded)         │         │
+│   │    metadata  → {name, email, skills_flat, resume_json}   │         │
+│   │                  ↑ resume_json enables evaluator to work  │         │
+│   │                    without in-memory cache on restart     │         │
+│   └──────────────────────────────────────────────────────────┘         │
+│                                                                         │
+│   ┌──────────────────────────────────────────────────────────┐         │
+│   │  MongoDB  candidates collection  (database.py)           │         │
+│   │                                                          │         │
+│   │  _id      : email (preferred) or base_id                 │         │
+│   │  base_id  : slug (e.g. "john_doe")                       │         │
+│   │  latest_sub_id: int  (authoritative version counter)     │         │
+│   │  resume_json: dict   (latest version)                    │         │
+│   │  resumes[]: [{sub_id, chroma_id, filename, added_at}]   │         │
+│   │             one entry per resume version                 │         │
 │   └──────────────────────────────────────────────────────────┘         │
 └─────────────────────────────────────────────────────────────────────────┘
                               │
                               │ candidates indexed
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      JD DEDUPLICATION CHECK                             │
+│                                                                         │
+│  make_jd_hash(jd) → SHA-256[:16] hex string                            │
+│  find_job_by_hash(hash) → most recent matching job doc or None         │
+│                                                                         │
+│  ┌─ Same JD + uploads present ──────────────────────────────────┐      │
+│  │  FAST PATH (~10-15s)                                         │      │
+│  │  1. Evaluate uploaded candidates only (parallel, ≤5 workers) │      │
+│  │  2. Load cached pool rankings from MongoDB jobs collection   │      │
+│  │  3. Merge + re-sort by match_score + re-rank                 │      │
+│  │  4. Attach match_level labels                                │      │
+│  │  5. Create sessions: uploaded Good/Strong Fit + top-5 pool  │      │
+│  │  6. Return {rankings, sessions, reused_job_id, reused_date,  │      │
+│  │            pool_changed, old_pool_size}                      │      │
+│  └──────────────────────────────────────────────────────────────┘      │
+│                                                                         │
+│  ┌─ New JD or no uploads ───────────────────────────────────────┐      │
+│  │  FULL PIPELINE (below)                                       │      │
+│  └──────────────────────────────────────────────────────────────┘      │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              │ (full pipeline path)
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     LANGGRAPH STATE MACHINE                             │
@@ -109,9 +127,6 @@ WebSocket UI.
 │  ┌──────────────────────────────────────────────────┐                  │
 │  │  job_description        str                      │                  │
 │  │  required_skills        List[str]                │                  │
-│  │  min_experience_years   Optional[int]            │                  │
-│  │  required_education     Optional[str]            │                  │
-│  │  evaluation_criteria    Optional[dict]           │                  │
 │  │  plan                   Optional[dict]      ──── │── written by [1] │
 │  │  search_queries         List[str]           ──── │── written by [1] │
 │  │  retrieved_ids          List[str]           ──── │── written by [2] │
@@ -121,9 +136,6 @@ WebSocket UI.
 │  │  interview_questions    Dict[str,Any]       ──── │── written by [6] │
 │  │  errors                 List[str]   (+add)  ──── │── any node       │
 │  └──────────────────────────────────────────────────┘                  │
-│                                                                         │
-│  Note: evaluations and errors use Annotated[List, operator.add]        │
-│  so multiple nodes can append without overwriting each other            │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ```
@@ -140,50 +152,36 @@ WebSocket UI.
 │  [1] PLANNER NODE                                                │
 │                                                                  │
 │  Role    : Decompose the job description into a search strategy  │
-│  Agent   : LLM (DeepSeek v4 Flash)                              │
-│                                                                  │
-│  INPUT  (reads from state)                                       │
-│    job_description, required_skills,                             │
-│    min_experience_years, required_education                      │
-│                                                                  │
-│  PROMPT STRATEGY                                                 │
-│    Asks LLM to act as "recruiting planner"                       │
-│    temp=0.2 for deterministic output                             │
+│  Agent   : LLM (DeepSeek v4 Flash), temp=0.2                    │
 │                                                                  │
 │  OUTPUT (writes to state)                                        │
 │    plan: {                                                       │
-│      search_queries        List[str]  (3 semantic queries)       │
+│      search_queries         List[str]  (3 semantic queries)      │
 │      evaluation_focus_areas List[str]                            │
 │      scoring_weights        {skills, experience,                 │
 │                              education, projects}  (sum=1.0)    │
 │      hard_requirements      List[str]  (must-haves)             │
 │      nice_to_have           List[str]  (optional)               │
-│      top_candidate_count    int                                  │
 │    }                                                             │
-│    search_queries: List[str]  (copied from plan for next node)  │
+│    search_queries: List[str]                                     │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  [2] RETRIEVER NODE                                              │
 │                                                                  │
-│  Role    : Semantic search over ChromaDB to find relevant        │
-│            candidates for each search query                      │
+│  Role    : Retrieve ALL candidates from ChromaDB                 │
 │  Agent   : ChromaDB (no LLM call)                               │
 │                                                                  │
-│  INPUT  (reads from state)                                       │
-│    search_queries  List[str]                                     │
-│                                                                  │
 │  PROCESS                                                         │
-│    For each query → collection.query(query_texts, n_results=10)  │
-│    Embedding: all-MiniLM-L6-v2 (384-dim, ONNX)                  │
-│    Distance:  cosine  →  similarity = 1 - distance              │
+│    top_k = pool_size  (full pool — no artificial cap)            │
+│    For each query → collection.query(query_texts, n_results=N)   │
 │    Deduplication: set() across all query results                 │
 │    Rerank: sort by similarity_score descending                   │
-│    Cap at top 20 candidates                                      │
+│    No [:20] cap — every candidate is evaluated                   │
 │                                                                  │
-│  OUTPUT (writes to state)                                        │
-│    retrieved_ids: List[str]   (candidate IDs, ranked)           │
+│  OUTPUT                                                          │
+│    retrieved_ids: List[str]  (all candidate IDs, ranked)        │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
@@ -191,35 +189,18 @@ WebSocket UI.
 │  [3] EVALUATOR NODE                                              │
 │                                                                  │
 │  Role    : Score every retrieved candidate against the JD        │
-│  Agent   : LLM per candidate (parallel-ready, currently serial) │
+│  Agent   : Parallel LLM calls (ThreadPoolExecutor, max_workers=6)│
 │                                                                  │
-│  INPUT  (reads from state)                                       │
-│    retrieved_ids, job_description, plan                          │
-│    candidate_store (in-memory Resume objects)                    │
-│                                                                  │
-│  PROMPT STRATEGY                                                 │
-│    Passes full Resume JSON + JD + scoring_weights                │
-│    + hard_requirements + nice_to_have                            │
-│    temp=0.2, one LLM call per candidate                         │
+│  Resume data source (priority order):                            │
+│    1. candidate_store (in-memory, if added this request)         │
+│    2. ChromaDB metadata resume_json (persistent fallback)        │
 │                                                                  │
 │  OUTPUT per candidate (appended to state.evaluations)           │
-│    {                                                             │
-│      candidate_id          str                                   │
-│      candidate_name        str                                   │
-│      match_score           float  0–100                          │
-│      skills_score          float  0–100                          │
-│      experience_score      float  0–100                          │
-│      education_score       float  0–100                          │
-│      strengths             List[str]                             │
-│      weaknesses            List[str]                             │
-│      matched_skills        List[str]                             │
-│      missing_skills        List[str]                             │
-│      meets_hard_requirements bool                                │
-│      overall_recommendation STRONG_MATCH|MATCH|                 │
-│                             WEAK_MATCH|NOT_QUALIFIED             │
-│      reasoning             str                                   │
-│      suggested_interview_questions List[str]                     │
-│    }                                                             │
+│    {candidate_id, candidate_name, match_score (0-100),          │
+│     skills_score, experience_score, education_score,            │
+│     strengths[], weaknesses[], matched_skills[], missing_skills[]│
+│     meets_hard_requirements, overall_recommendation,            │
+│     reasoning}                                                   │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
@@ -229,30 +210,16 @@ WebSocket UI.
 │  Role    : QA reviewer — validates all evaluations for           │
 │            consistency, catches score inflation/deflation,       │
 │            applies corrections, decides who gets interviewed     │
-│  Agent   : LLM (single call over all evaluations)               │
-│                                                                  │
-│  INPUT  (reads from state)                                       │
-│    evaluations, job_description                                  │
-│                                                                  │
-│  PROMPT STRATEGY                                                 │
-│    Checks: score inflation, ignored hard requirements,           │
-│    inconsistent recommendations between candidates               │
-│    temp=0.2                                                      │
+│  Agent   : LLM (single call over all evaluations), temp=0.2     │
 │                                                                  │
 │  POST-PROCESSING                                                 │
-│    Applies adjustments dict back into evaluations in-place       │
+│    Applies score adjustments back into evaluations in-place      │
 │    Marks ev["score_adjusted"] = True on changed scores          │
 │                                                                  │
-│  OUTPUT (writes to state)                                        │
-│    critique: {                                                   │
-│      is_valid                bool                                │
-│      issues_found            List[str]                           │
-│      adjustments             [{candidate_id, adjusted_score,     │
-│                                reason}]                          │
-│      recommended_for_interview List[str]  (candidate IDs)       │
-│      overall_quality         GOOD|ACCEPTABLE|NEEDS_REVIEW        │
-│      summary                 str                                 │
-│    }                                                             │
+│  OUTPUT                                                          │
+│    critique: {is_valid, issues_found[], adjustments[],           │
+│               recommended_for_interview[], overall_quality,      │
+│               summary}                                           │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
@@ -262,62 +229,49 @@ WebSocket UI.
 │  Role    : Produce the final ranked list                         │
 │  Agent   : Deterministic (no LLM call)                          │
 │                                                                  │
-│  INPUT  (reads from state)                                       │
-│    evaluations, critique.recommended_for_interview               │
-│                                                                  │
 │  PROCESS                                                         │
 │    Sort evaluations by match_score descending                    │
 │    Assign rank = 1, 2, 3 ...                                     │
 │    Set recommended_for_interview = True if ID in critique list  │
 │                                                                  │
-│  OUTPUT (writes to state)                                        │
-│    final_rankings: List[{                                        │
-│      rank                    int                                 │
-│      candidate_id            str                                 │
-│      candidate_name          str                                 │
-│      match_score             float                               │
-│      overall_recommendation  str                                 │
-│      recommended_for_interview bool                              │
-│      strengths, weaknesses, matched_skills, missing_skills       │
-│      reasoning, score_adjusted (if critique changed it)          │
-│    }]                                                            │
+│  match_level labels added in interview_app.py post-processing:  │
+│    match_score ≥ 70  OR STRONG_MATCH  → "Strong Fit"            │
+│    match_score ≥ 50  OR MATCH         → "Good Fit"              │
+│    match_score ≥ 30  OR WEAK_MATCH    → "Potential Fit"         │
+│    otherwise                          → "Not Recommended"        │
+│                                                                  │
+│  OUTPUT                                                          │
+│    final_rankings: List[{rank, candidate_id, candidate_name,     │
+│      match_score, match_level, overall_recommendation,           │
+│      recommended_for_interview, strengths[], weaknesses[],       │
+│      matched_skills[], missing_skills[], reasoning}]             │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  [6] INTERVIEW QUESTION GENERATOR NODE                           │
 │                                                                  │
-│  Role    : For each recommended candidate, generate a full       │
-│            tailored interview question bank                      │
-│  Agent   : LLM per recommended candidate                        │
-│  Gate    : Only fires for recommended_for_interview = True       │
-│                                                                  │
-│  INPUT  (reads from state)                                       │
-│    final_rankings (filtered to recommended only)                 │
-│    candidate_store (Resume objects)                              │
-│    job_description                                               │
-│    per-candidate: match_score, strengths, weaknesses,           │
-│                   missing_skills, matched_skills                 │
+│  Role    : Generate tailored interview question banks            │
+│  Agent   : Parallel LLM (ThreadPoolExecutor, max_workers=5)     │
+│  Gate    : recommended_for_interview = True only, capped at top 5│
 │                                                                  │
 │  PROMPT STRATEGY                                                 │
-│    Passes full Resume JSON + JD + evaluation breakdown           │
-│    Instructs LLM to generate questions that are:                 │
-│    - Non-generic (tied to their actual resume content)           │
-│    - Gap-targeted (each weakness → a question)                   │
-│    - Project-specific (named projects from resume)              │
-│    temp=0.4, max_tokens=2048                                     │
+│    Full Resume JSON + JD + evaluation breakdown                  │
+│    Questions are non-generic, gap-targeted, project-specific     │
+│    temp=0.4, max_tokens=1400                                     │
 │                                                                  │
-│  OUTPUT per candidate (writes to state.interview_questions)      │
-│    {candidate_id}: {                                             │
-│      candidate_name   str                                        │
-│      rank             int                                        │
-│      match_score      float                                      │
-│      technical_depth  [{question, what_to_look_for, follow_up}] │
-│      gap_probing      [{gap, question, what_to_look_for}]       │
-│      project_specific [{project, question, what_to_look_for}]   │
-│      system_design    [{question, what_to_look_for}]            │
-│      behavioral       [{question, what_to_look_for}]            │
-│    }                                                             │
+│  OUTPUT per candidate                                            │
+│    {candidate_name, rank, match_score,                           │
+│     technical_depth  [{question, what_to_look_for, follow_up}]  │
+│     gap_probing      [{gap, question, what_to_look_for}]        │
+│     project_specific [{project, question, what_to_look_for}]    │
+│     system_design    [{question, what_to_look_for}]             │
+│     behavioral       [{question, what_to_look_for}]}            │
+│                                                                  │
+│  Post-pipeline session creation (interview_app.py):             │
+│    Sessions for top-5 recommended pool candidates               │
+│    PLUS all uploaded Strong/Good Fit not already covered        │
+│    PLUS top-5 pool Strong/Good Fit on fast-path re-runs         │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                       END
@@ -332,7 +286,64 @@ START → planner → retriever → evaluator → critique → synthesizer → i
 ```
 
 All edges are deterministic (no conditional branching).
-State flows through every node in sequence.
+
+---
+
+## MongoDB Persistence Layer
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MONGODB  (database.py)                               │
+│                                                                         │
+│  URI    : MONGO_URI env var (default: mongodb://localhost:27017)        │
+│  DB     : interview_agentic                                             │
+│                                                                         │
+│  ── candidates collection ─────────────────────────────────────────    │
+│  {                                                                      │
+│    _id:           email or base_id  (string, not ObjectId)             │
+│    base_id:       "john_doe"                                            │
+│    name:          "John Doe"                                            │
+│    email:         "john.doe@gmail.com"                                  │
+│    source:        "uploaded" | "seeded"                                 │
+│    latest_sub_id: 2                                                     │
+│    resume_json:   {...}   ← always the latest version                  │
+│    resumes: [                                                           │
+│      {sub_id:1, chroma_id:"john_doe_1", filename:"cv_v1.pdf", ...}    │
+│      {sub_id:2, chroma_id:"john_doe_2", filename:"cv_v2.pdf", ...}    │
+│    ]                                                                    │
+│    added_at, updated_at                                                 │
+│  }                                                                      │
+│                                                                         │
+│  ── jobs collection ───────────────────────────────────────────────    │
+│  {                                                                      │
+│    _id:                  ObjectId                                       │
+│    jd_hash:              "a3f1b2c4..."  ← SHA-256[:16] for dedup      │
+│    job_description:      str                                            │
+│    required_skills:      []                                             │
+│    pool_size:            int                                            │
+│    candidates_evaluated: int                                            │
+│    rankings:             [{rank, candidate_id, match_score, ...}]      │
+│    critique_summary:     str                                            │
+│    run_at:               datetime                                       │
+│  }                                                                      │
+│                                                                         │
+│  ── interview_reports collection ──────────────────────────────────    │
+│  {                                                                      │
+│    _id:             session_id  (UUID string)                           │
+│    job_id:          str (ObjectId of the screening run)                │
+│    candidate_id:    str                                                 │
+│    candidate_name:  str                                                 │
+│    job_description: str (first 500 chars)                              │
+│    verdict:         HIRE | STRONG_HIRE | HOLD | REJECT                 │
+│    overall_score:   float                                               │
+│    summary:         str                                                 │
+│    transcript:      [{question_idx, category, question, answer,        │
+│                        evaluation}]                                     │
+│    report:          full report dict                                    │
+│    completed_at:    datetime                                            │
+│  }                                                                      │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -342,27 +353,10 @@ State flows through every node in sequence.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     INTERVIEW STATE MACHINE                              │
 │                                                                         │
-│  Triggered for each candidate in interview_questions{}                  │
-│  (i.e. recommended_for_interview = True only)                           │
+│  Triggered for each candidate with a session                            │
+│  (recommended pool candidates + qualifying uploaded candidates)         │
 │                                                                         │
-│  InterviewState (TypedDict)                                             │
-│  ┌──────────────────────────────────────────────┐                      │
-│  │  candidate_id        str                     │                      │
-│  │  candidate_name      str                     │                      │
-│  │  job_description     str                     │                      │
-│  │  question_queue      List[Dict]   flat list  │                      │
-│  │  current_idx         int                     │                      │
-│  │  current_question    Optional[Dict]          │                      │
-│  │  follow_up_count     int                     │                      │
-│  │  max_follow_ups      int  (configurable)     │                      │
-│  │  last_answer         str                     │                      │
-│  │  transcript          List[Dict]  (+add)      │                      │
-│  │  answer_scores       List[Dict]  (+add)      │                      │
-│  │  is_complete         bool                    │                      │
-│  │  final_report        Optional[Dict]          │                      │
-│  └──────────────────────────────────────────────┘                      │
-│                                                                         │
-│  Question queue is flattened from 5 categories in this order:          │
+│  Question queue flattened from 5 categories:                           │
 │    technical_depth → gap_probing → project_specific →                  │
 │    system_design → behavioral                                           │
 │                                                                         │
@@ -372,17 +366,17 @@ State flows through every node in sequence.
 │  [1] load_questions    Flatten IQ dict → ordered question_queue        │
 │    │                                                                    │
 │    ▼                                                                    │
-│  [2] ask_question      Pop current Q, send via TTS or WebSocket        │
+│  [2] ask_question      Pop current Q, send via TTS + WebSocket         │
 │    │                                                                    │
 │    ▼                                                                    │
-│  [3] listen            Receive audio → Whisper STT → text              │
+│  [3] listen            Receive audio → Whisper/Groq STT → text         │
 │    │                                                                    │
 │    ▼                                                                    │
 │  [4] evaluate          LLM scores answer 1–10, hits/misses,            │
 │                        needs_follow_up flag                             │
 │    │                                                                    │
 │    ▼                                                                    │
-│  [5] decide  ──────────────────────────────────────────────────────►   │
+│  [5] decide                                                             │
 │    │  needs_follow_up AND follow_up_count < max_follow_ups?            │
 │    │    YES → inject follow_up Q at current_idx+1 → ask_question       │
 │    │    NO  → advance current_idx                                       │
@@ -391,10 +385,12 @@ State flows through every node in sequence.
 │    │    NO  → report                                                    │
 │    │                                                                    │
 │    ▼                                                                    │
-│  [6] report            LLM generates final assessment:                 │
+│  [6] report            LLM generates final assessment                  │
 │                          overall_score, verdict, category_scores,      │
 │                          top_strengths, key_concerns, recommendation   │
 │    │                                                                    │
+│    ▼                                                                    │
+│  MongoDB interview_reports.update_one (upsert by session_id)          │
 │   END                                                                   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -407,37 +403,26 @@ State flows through every node in sequence.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          VOICE I/O  (voice_io.py)                       │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  TextToSpeech  (edge-tts)                                       │   │
-│  │                                                                 │   │
-│  │  Voice   : en-US-GuyNeural (Microsoft Edge neural)              │   │
-│  │  Cost    : Free (uses Edge cloud endpoint, no API key)          │   │
-│  │  Output  : MP3 bytes streamed async → base64 → WebSocket        │   │
-│  │  Latency : ~500ms for a typical question (~20 words)            │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  TTS: edge-tts                                                          │
+│    Voice   : en-US-GuyNeural (Microsoft Edge neural)                    │
+│    Cost    : Free (no API key)                                          │
+│    Output  : MP3 bytes streamed async → base64 → WebSocket              │
+│    Latency : ~500ms for a typical question                              │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  SpeechToText  (faster-whisper — local)                         │   │
-│  │                                                                 │   │
-│  │  Model   : large-v3  (3GB, downloaded once, cached)            │   │
-│  │  Device  : CPU (int8 quantized)                                 │   │
-│  │  Speed   : ~0.5–1× real-time on CPU                            │   │
-│  │  Options : vad_filter=True, condition_on_previous_text=False    │   │
-│  │            initial_prompt = domain vocab + current question     │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  STT Local: faster-whisper                                              │
+│    Model   : large-v3  (3GB, cached after first download)              │
+│    Device  : CPU (int8 quantized)                                       │
+│    Speed   : ~0.5–1× real-time on CPU                                  │
+│    Options : vad_filter=True, condition_on_previous_text=False,         │
+│              initial_prompt = domain vocab + current question           │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  GroqSTT  (Groq cloud — alternative)                            │   │
-│  │                                                                 │   │
-│  │  Model   : whisper-large-v3 (same model, cloud GPU)             │   │
-│  │  Cost    : Free tier — 28,800s audio/day (~8 hours)            │   │
-│  │  Speed   : ~5s for 2min audio (~20× faster than local CPU)     │   │
-│  │  API     : POST https://api.groq.com/openai/v1/audio/          │   │
-│  │            transcriptions  (OpenAI-compatible format)           │   │
-│  │  Key     : GROQ_API_KEY in .env                                 │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  STT Cloud: GroqSTT                                                     │
+│    Model   : whisper-large-v3 (same model, cloud GPU)                   │
+│    Cost    : Free tier — 28,800s audio/day (~8 hours)                  │
+│    Speed   : ~5s for 2min audio (~20× faster than local CPU)           │
+│    Key     : GROQ_API_KEY in .env                                       │
 │                                                                         │
-│  Switch: STT_PROVIDER = "local" | "groq"  (interview_app.py line 28)  │
+│  Switch: STT_PROVIDER = "local" | "groq"  (interview_app.py line ~30) │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -451,58 +436,38 @@ State flows through every node in sequence.
 │                                                                         │
 │  Server: uvicorn  http://0.0.0.0:8001                                   │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  GET  /                                                         │   │
-│  │    Serves dark-theme single-page HTML/CSS/JS from ui.py         │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  GET  /                      Dark-theme SPA (served from ui.py)        │
+│  GET  /api/pool-count        {count, mongo}                             │
+│  GET  /api/jobs              List past screening runs (summary)         │
+│  GET  /api/jobs/{id}         Full screening result (read-only)         │
+│  GET  /api/reports           List completed interview reports           │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  POST /api/screen   multipart/form-data                         │   │
-│  │    Fields: resume (file), jd (str), skills (str),              │   │
-│  │            max_follow_ups (int)                                 │   │
-│  │    Flow:                                                        │   │
-│  │      ResumeParser → OpenRouter LLM → ChromaDB index            │   │
-│  │      → ScreeningPipeline (6-node LangGraph)                     │   │
-│  │      → _flatten_questions() → session stored in memory          │   │
-│  │    Returns: {session_id, candidate_name, match_score,           │   │
-│  │              total_questions}                                    │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  POST /api/screen  multipart/form-data                                  │
+│    Fields: resumes[] (multiple files), jd, skills, max_follow_ups      │
+│    Fast path  : same JD detected → cached pool + eval uploads only     │
+│    Full path  : 6-node LangGraph pipeline → persist to MongoDB         │
+│    Returns: {rankings[], sessions{}, pool_size, uploaded_cids[],       │
+│              reused_job_id?, reused_job_date?, pool_changed?,          │
+│              old_pool_size?}                                            │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  POST /api/submit-answer   multipart/form-data                  │   │
-│  │    Fields: audio (WAV file), session_id, question_idx           │   │
-│  │    Flow:                                                        │   │
-│  │      WAV → STT (local Whisper or Groq API)                      │   │
-│  │      → silence guard (< 4 words → score=0, skip LLM)           │   │
-│  │      → LLM evaluation (score, hits, misses, needs_follow_up)   │   │
-│  │      → push via WebSocket                                       │   │
-│  │    Audio encoding: browser converts WebM→WAV via AudioContext   │   │
-│  │    (native sample rate, no ffmpeg)                              │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  POST /api/submit-answer  multipart/form-data                           │
+│    Fields: audio (WAV), session_id, question_idx                       │
+│    Flow: WAV → STT → silence guard → LLM eval → WS push               │
 │                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  WebSocket /ws/{session_id}                                     │   │
-│  │                                                                 │   │
-│  │  Client → Server messages:                                      │   │
-│  │    {type: "start"}   → triggers send_question()                 │   │
-│  │    {type: "next"}    → advance idx → send_question() or finish  │   │
-│  │                                                                 │   │
-│  │  Server → Client messages:                                      │   │
-│  │    {type: "question", idx, category, question, gap}             │   │
-│  │    {type: "tts_audio", audio_b64}   base64 MP3                  │   │
-│  │    {type: "transcription", text}    raw Whisper output          │   │
-│  │    {type: "evaluation", evaluation} score + hits/misses         │   │
-│  │    {type: "report", report}         final assessment            │   │
-│  │    {type: "status", text, color}    status bar updates          │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  WS /ws/{session_id}                                                    │
+│    Client → Server: {type:"start"}, {type:"next"}                      │
+│    Server → Client: {type:"question"}, {type:"tts_audio"},             │
+│                     {type:"transcription"}, {type:"evaluation"},        │
+│                     {type:"report"}, {type:"status"}                   │
 │                                                                         │
-│  Session state (in-memory dict):                                        │
-│    candidate_id, candidate_name, job_description                        │
-│    question_queue: List[Dict]   (flat, follow-ups injected inline)     │
-│    current_idx: int                                                     │
-│    follow_up_count: int,  max_follow_ups: int                          │
-│    transcript: List[Dict],  answer_scores: List[Dict]                  │
-│    ws: WebSocket reference,  stt: STT instance (cached per session)    │
+│  UI Panels:                                                             │
+│    Setup panel      — JD input, skills, file upload, past runs         │
+│    Rankings panel   — "Your Uploaded Candidates" highlight card +       │
+│                       full talent pool table; Interview buttons for     │
+│                       candidates with sessions                          │
+│                       Yellow banner on cached-run fast path            │
+│    Interview panel  — live Q&A with TTS playback + answer recording    │
+│    Report panel     — final verdict, scores, strengths, concerns       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -511,17 +476,20 @@ State flows through every node in sequence.
 ## LLM Call Distribution
 
 ```
-Node                    LLM Calls       When
-────────────────────────────────────────────────────────────
-Ingestion (parser)      1 per resume    On upload / add_candidate()
-Planner                 1               Once per screen_candidates()
-Retriever               0               ChromaDB only
-Evaluator               N               1 per retrieved candidate
-Critique                1               Once, over all evaluations
-Synthesizer             0               Deterministic sort
-Interview Questions     M               1 per recommended candidate
-────────────────────────────────────────────────────────────
-Total per screening     1 + N + 1 + M  where N = retrieved, M <= N
+Node / Step              LLM Calls        Notes
+────────────────────────────────────────────────────────────────────
+Ingestion (parser)       1 per resume     On upload / add_candidate()
+Planner                  1                Once per full pipeline run
+Retriever                0                ChromaDB only (free)
+Evaluator                N (parallel)     1 per candidate, 6 workers
+Critique                 1                Once, over all evaluations
+Synthesizer              0                Deterministic sort (free)
+IQ Generator             ≤5 (parallel)    1 per recommended, 5 workers
+Answer evaluator         1 per answer     During live interview
+Final report             1 per session    After all questions answered
+────────────────────────────────────────────────────────────────────
+Fast path (same JD)      U only           U = uploaded candidates
+                                          Pool rankings from MongoDB
 ```
 
 ---
@@ -531,17 +499,26 @@ Total per screening     1 + N + 1 + M  where N = retrieved, M <= N
 ```
 ScreeningQuery (JD + filters)
         │
+        ├──[JD hash check]──► cached job found?
+        │    YES + uploads ──► fast path (eval uploads, merge cached)
+        │    NO ──────────────►
+        │
         ├──[Planner]──────► plan + search_queries
         │
-        ├──[Retriever]────► retrieved_ids   (ChromaDB cosine search)
+        ├──[Retriever]────► retrieved_ids   (full pool, ChromaDB cosine)
         │
-        ├──[Evaluator]────► evaluations[]   (1 LLM call per candidate)
+        ├──[Evaluator]────► evaluations[]   (parallel, 6 workers)
         │
         ├──[Critique]─────► critique        (adjusts scores in-place)
         │
-        ├──[Synthesizer]──► final_rankings  (sorted, ranked, flagged)
+        ├──[Synthesizer]──► final_rankings  (sorted, ranked, labelled)
         │
-        └──[IQ Generator]► interview_questions{}  (per recommended)
+        ├──[IQ Generator]► interview_questions{}  (parallel, top 5)
+        │
+        ├──[MongoDB]──────► jobs.insert_one (with jd_hash)
+        │
+        └──[Sessions]─────► in-memory sessions dict
+                            (top-5 pool + all qualifying uploads)
 ```
 
 ---
@@ -552,17 +529,41 @@ ScreeningQuery (JD + filters)
 interview_agentic/
 │
 ├── interview_app.py        Main entry point — FastAPI + WebSocket server
-│                           STT_PROVIDER = "local" | "groq"  (line 28)
-│                           POST /api/screen, /api/submit-answer
+│                           STT_PROVIDER = "local" | "groq"
+│                           POST /api/screen  (fast path + full pipeline)
+│                           POST /api/submit-answer
 │                           WebSocket /ws/{session_id}
-│                           In-memory session store
+│                           _match_level(), _generate_iq(),
+│                           _evaluate_candidate(), _resume_similarity()
 │
 ├── ui.py                   Full dark-theme single-page frontend
 │                           HTML + CSS + JS as HTML string constant
-│                           (imported by interview_app.py)
+│                           Panels: setup / rankings / interview / report
+│                           Rankings: uploaded highlight card + pool table
+│                           Cached-run banner, past runs history
+│
+├── database.py             MongoDB integration (pymongo)
+│                           Collections: candidates, jobs, interview_reports
+│                           resolve_candidate_id()  — email slug + sub_id
+│                           add_resume_version()    — upsert + push to resumes[]
+│                           find_resume_by_filename()
+│                           update_resume_version_inplace()
+│                           make_jd_hash(), find_job_by_hash()
+│                           save_job(), get_job(), list_jobs()
+│                           save_interview_report(), list_reports()
+│
+├── agentic_pipeline.py     Screening pipeline
+│                           PipelineState (TypedDict)
+│                           CandidateVectorStore (ChromaDB)
+│                             get_candidate_data() — resume_json from metadata
+│                           AgentNodes (all 6 LangGraph nodes)
+│                             evaluator_node  — ThreadPoolExecutor(6)
+│                             interview_questions_node — ThreadPoolExecutor(5)
+│                             retriever_node — full pool (top_k=pool_size)
+│                           build_screening_graph() → compiled graph
+│                           ScreeningPipeline (facade class)
 │
 ├── interview_simulator.py  LangGraph 7-node interview state machine
-│                           InterviewState (TypedDict)
 │                           _flatten_questions() — 5-category ordering
 │                           _parse_json() — robust JSON extraction
 │
@@ -571,16 +572,9 @@ interview_agentic/
 │                           SpeechToText  — faster-whisper (local CPU/GPU)
 │                           GroqSTT       — Groq cloud Whisper large-v3
 │
-├── agentic_pipeline.py     Screening pipeline
-│                           PipelineState (TypedDict)
-│                           CandidateVectorStore (ChromaDB)
-│                           AgentNodes (all 6 LangGraph nodes)
-│                           build_screening_graph() → compiled graph
-│                           ScreeningPipeline (facade class)
-│
 ├── openrouter_client.py    OpenRouter API wrapper
 │                           call_llm(), extract_resume_from_text()
-│                           evaluate_candidate(), _dict_to_resume()
+│                           Timeout: 60s (handles parallel load)
 │
 ├── resume_parser.py        File → raw text extraction
 │                           PDF via PyPDF2, DOCX via python-docx
@@ -590,6 +584,10 @@ interview_agentic/
 │                           Project, Certification, Language, Resume
 │                           Python dataclasses (no Pydantic — Py 3.14)
 │
+├── seed_candidates.py      Populates ChromaDB + MongoDB with 49 synthetic
+│                           candidates across 4 tiers (Tier 1–4)
+│                           Run once: python seed_candidates.py
+│
 ├── run_interview.py        CLI entry point (terminal-only, no browser)
 ├── main.py                 Legacy FastAPI screening-only endpoints
 ├── example_usage.py        CLI demo / smoke test script
@@ -597,7 +595,8 @@ interview_agentic/
 ├── chroma_db/              ChromaDB persistent storage (auto-created)
 │
 ├── requirements.txt        All dependencies
-├── .env                    OPENROUTER_API_KEY, GROQ_API_KEY, CHROMA_DB_PATH
+├── .env                    OPENROUTER_API_KEY, GROQ_API_KEY,
+│                           MONGO_URI, MONGO_DB, CHROMA_DB_PATH
 ├── .env.example            Template for new setups
 ├── TODO.md                 Feature backlog + pipeline architecture
 └── ARCHITECTURE.md         This file
@@ -612,122 +611,51 @@ interview_agentic/
 ```
 Document              Avg Words    Avg Tokens    Notes
 ──────────────────────────────────────────────────────────────────────
-Resume (raw text)     400–600 w    500–800 tok   1 page = ~400w,
-                                                 2 page = ~700w
-                      assumed avg: 600 tokens raw text
-
+Resume (raw text)     400–600 w    500–800 tok   1 page = ~400w
 Extraction prompt     —            ~300 tok      Fixed system prompt
-                                                 + JSON schema
-
-Resume JSON output    —            ~800 tok      Structured fields,
-                                                 all sections filled
-
-Job Description (JD)  200–400 w    ~500 tok      Typical JD with
-                                                 requirements, role,
-                                                 responsibilities
-
+Resume JSON output    —            ~800 tok      Structured fields
+Job Description (JD)  200–400 w    ~500 tok
 Evaluation prompt     —            ~300 tok      Fixed recruiter prompt
-                                                 + weights + hard reqs
-
-Evaluation output     —            ~500 tok      JSON: scores, skills,
-                                                 reasoning, recommendation
-
-Critique input        —            500 tok/eval  JD + N evaluations
-                      (per eval)                 stacked in one prompt
-
-IQ prompt             —            ~500 tok      Fixed interviewer prompt
-                                                 + strengths/gaps context
-
-IQ output             —            ~1500 tok     5 categories × 3 qs
-                                                 with signals + follow-ups
+Evaluation output     —            ~500 tok
+IQ prompt             —            ~500 tok
+IQ output             —            ~1400 tok     capped at max_tokens=1400
 ```
 
----
-
-### Per-Stage Token Breakdown (1 JD × 1000 Resumes)
+### Per-Stage Token Breakdown (1 JD × 1000 Resumes, full pipeline)
 
 ```
 Stage                   Calls    Input Tokens        Output Tokens
 ────────────────────────────────────────────────────────────────────────
-Ingestion               1000     (600 raw + 300       800 (JSON output)
-(parse resumes)                   prompt) × 1000      per resume
-                                 = 900K input         = 800K output
-
-Planner                    1     JD(500) + instr      plan JSON
-                                 = ~500 input         = ~300 output
-
-Retriever (ChromaDB)       0     —                    —          FREE
-                                 ONNX embeddings run locally
-
-Evaluator               top 20   JD(500) + resume     eval JSON
-(1 call/candidate)               JSON(800) + prompt   = ~500 output
-                                 (300) = 1600/each
-                                 × 20 = 32K input     = 10K output
-
-Critique                   1     JD(500) + 20 evals   critique JSON
-                                 (500 each = 10K) +   = ~500 output
-                                 prompt(300)
-                                 = ~10.8K input
-
-Synthesizer                0     —                    —          FREE
-                                 deterministic sort, no LLM
-
-Interview Questions        5     JD(500) + resume      questions JSON
-(top 5 recommended)              JSON(800) + eval      = ~1500/each
-                                 (600) + prompt(500)   × 5 = 7.5K output
-                                 = 2400/each
-                                 × 5 = 12K input
+Ingestion               1000     900K input          800K output
+Planner                    1     ~500 input          ~300 output
+Retriever (ChromaDB)       0     FREE (local ONNX)   —
+Evaluator               all N    1600/each           ~500/each
+Critique                   1     ~10.8K input        ~500 output
+Synthesizer                0     FREE                —
+IQ Generator              ≤5     2400/each × 5       1400/each × 5
 ────────────────────────────────────────────────────────────────────────
-TOTAL                   1026     ~1,155K input        ~818K output
+Fast path (same JD)     U only   1600/each × U       500/each × U
+(U = uploaded resumes)           No planner/retriever/critique/synth
 ```
-
----
 
 ### Cost Estimate — DeepSeek V3 via OpenRouter
 
 ```
-Model : deepseek/deepseek-chat  (DeepSeek V3 / v4 Flash)
-Rates : $0.14 / 1M input tokens   |   $0.28 / 1M output tokens
-```
+Rates: $0.14 / 1M input tokens  |  $0.28 / 1M output tokens
 
-```
-Stage                   Input Cost      Output Cost     Stage Total
-────────────────────────────────────────────────────────────────────
-Ingestion (1000 resumes) $0.126          $0.224          $0.350
-Planner                  $0.000          $0.000          $0.000
-Retriever                FREE            FREE            $0.000
-Evaluator (top 20)       $0.004          $0.003          $0.007
-Critique                 $0.002          $0.000          $0.002
-Synthesizer              FREE            FREE            $0.000
-Interview Qs (top 5)     $0.002          $0.002          $0.004
-────────────────────────────────────────────────────────────────────
-TOTAL                    $0.134          $0.229          $0.363
-```
-
----
-
-### Scaling Table
-
-```
 Scenario                                          Est. Cost
 ──────────────────────────────────────────────────────────────
-1 JD  ×  1,000 resumes  (first parse + screen)    ~$0.39
-1 JD  ×  1,000 resumes  (already parsed, new JD)  ~$0.01
-10 JDs ×  1,000 resumes (parse once, 10 screens)  ~$0.49
-1 JD  × 10,000 resumes  (first parse + screen)    ~$3.64
-1 JD  × 10,000 resumes  (already parsed, new JD)  ~$0.07
+1 JD × 1,000 resumes  (first parse + screen)      ~$0.39
+1 JD × 1,000 resumes  (already parsed, new JD)    ~$0.01
+10 JDs × 1,000 resumes (parse once, 10 screens)   ~$0.49
+1 JD × 10,000 resumes  (first parse + screen)     ~$3.64
+Same JD re-run + 1 upload (fast path)             ~$0.001
 ```
 
 **Key observations:**
-
 - Ingestion is ~97% of total cost — and it is one-time per resume
-- Once 1000 resumes are parsed and indexed in ChromaDB, any new JD
-  costs only ~$0.01 to screen against them (Planner + Evaluator +
-  Critique + Interview Qs)
-- ChromaDB embeddings (all-MiniLM-L6-v2 via ONNX) run entirely
-  locally — zero cost regardless of scale
-- Cost per resume to parse: ~$0.00039  (less than 0.04 cents)
-- Cost per JD screening run (post-parse): ~$0.013
+- Fast path re-runs cost near zero (no pipeline, only eval uploaded candidates)
+- ChromaDB embeddings run entirely locally — zero cost regardless of scale
 
 ---
 
@@ -739,16 +667,20 @@ Layer               Technology              Purpose
 File parsing        PyPDF2, python-docx     Extract raw text
 LLM                 DeepSeek v4 Flash       Structured extraction,
                     via OpenRouter          evaluation, critique,
-                                            interview Q generation,
-                                            answer scoring, reports
+                                            IQ generation, answer
+                                            scoring, final reports
 Embeddings          all-MiniLM-L6-v2        384-dim sentence embeddings
                     (ChromaDB default)      via ONNX runtime (local)
 Vector DB           ChromaDB 1.5.x          Persistent cosine search
                     PersistentClient        HNSW index
-Orchestration       LangGraph 1.2.x         Two StateGraphs — screening
-                                            pipeline + interview loop
+Persistence         MongoDB 8.3.x           candidates, jobs,
+                    pymongo                 interview_reports
+Orchestration       LangGraph 1.2.x         Screening pipeline (6 nodes)
+                                            + interview loop (7 nodes)
 Data models         Python dataclasses      Resume schema, no Pydantic
                                             (Python 3.14 compat)
+Parallelism         ThreadPoolExecutor      Evaluator (6 workers),
+                                            IQ generator (5 workers)
 TTS                 edge-tts                Microsoft Edge neural voices
                                             Free, no API key, async MP3
 STT (local)         faster-whisper          Whisper large-v3 on CPU

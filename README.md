@@ -1,23 +1,19 @@
 # Multi-Agent Resume Screening Assistant
 
-An end-to-end agentic AI pipeline for resume screening and live voice interviews.  
-Parses resumes → screens candidates with a 6-node LangGraph pipeline → conducts a real-time voice interview with TTS questions and Whisper STT answers → produces a scored report with hiring verdict.
+An end-to-end agentic AI pipeline for talent pool screening and live voice interviews.  
+Seeds a candidate pool → screens the entire pool against a job description with a 6-node LangGraph pipeline → conducts real-time voice interviews with TTS questions and Whisper STT answers → produces scored reports with hiring verdicts — all persisted to MongoDB.
 
 ---
 
 ## What It Does
 
-1. **Upload** a resume (PDF/DOCX/TXT) and a job description
-2. **Screening pipeline** runs automatically:
-   - LLM extracts all resume fields into structured JSON
-   - ChromaDB indexes the candidate with sentence embeddings
-   - 6 LangGraph agents plan, retrieve, evaluate, critique, rank, and generate tailored interview questions
-3. **Live voice interview** starts in the browser:
-   - Questions are spoken aloud via Microsoft Edge TTS
-   - Candidate records answers (microphone)
-   - Whisper (local or Groq cloud) transcribes each answer
-   - LLM evaluates the answer and optionally asks a follow-up
-4. **Final report** with overall score, verdict (HIRE / STRONG HIRE / HOLD / REJECT), per-category scores, strengths, concerns, and full transcript
+1. **Seed a talent pool** — run `seed_candidates.py` once to populate ChromaDB + MongoDB with candidates (or upload resumes via UI)
+2. **Paste a job description** — the full pool is evaluated in parallel; results are ranked and cached by JD fingerprint
+3. **Upload new resumes** — parsed, deduplicated by filename + content similarity, evaluated against the JD:
+   - Same JD seen before → fast path (~10-15s): only new resumes re-evaluated, cached pool rankings merged
+   - New JD → full pipeline (~90s): all candidates scored from scratch
+4. **Interview recommended candidates** — Strong/Good Fit candidates get tailored question banks; live voice interview in browser with TTS + Whisper STT
+5. **Final report** — verdict (HIRE / STRONG HIRE / HOLD / REJECT), per-category scores, strengths, concerns, full transcript — saved to MongoDB
 
 ---
 
@@ -29,14 +25,18 @@ pip install -r requirements.txt
 
 # 2. Configure environment
 cp .env.example .env
-# Add your OPENROUTER_API_KEY (required)
-# Add your GROQ_API_KEY (optional — for fast cloud STT)
+# Edit .env — add your keys (see Environment Variables below)
 
-# 3. Run
+# 3. Seed the talent pool (run once)
+python seed_candidates.py
+
+# 4. Start the server
 python interview_app.py
 ```
 
 Open **http://localhost:8001** in your browser.
+
+MongoDB is optional — the app works without it (ChromaDB only), but persistence, history, and JD deduplication require a running MongoDB instance (`mongodb://localhost:27017` by default).
 
 ---
 
@@ -45,7 +45,7 @@ Open **http://localhost:8001** in your browser.
 Switch between local and cloud transcription with one line in `interview_app.py`:
 
 ```python
-STT_PROVIDER = "local"   # faster-whisper large-v3, runs on CPU, free, slow (~1x real-time)
+STT_PROVIDER = "local"   # faster-whisper large-v3, runs on CPU, free, slow
 STT_PROVIDER = "groq"    # Groq Whisper large-v3 API, free tier, ~20x faster
 ```
 
@@ -58,35 +58,56 @@ For Groq: get a free key at https://console.groq.com/keys and add `GROQ_API_KEY=
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  INGESTION                                                   │
-│  PDF/DOCX/TXT → ResumeParser (PyPDF2) → raw text            │
+│  PDF/DOCX/TXT → ResumeParser → raw text                     │
 │              → OpenRouter LLM → Resume dataclass (JSON)     │
+│              → Filename dedup (MongoDB resumes[] array)     │
+│                ≥90% similar  → skip (reuse sub_id)          │
+│                <90% similar  → overwrite in-place           │
+│                new filename  → new sub_id                   │
+│              → chroma_id = base_id + "_" + sub_id           │
 │              → ChromaDB (all-MiniLM-L6-v2, cosine)          │
+│              → MongoDB candidates collection                 │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────┐
+│  JD DEDUPLICATION                                            │
+│  SHA-256[:16] hash → find_job_by_hash()                     │
+│  Same JD + uploads → FAST PATH                              │
+│    Evaluate uploads only → merge cached pool → sessions     │
+│  New JD → FULL PIPELINE                                     │
 └─────────────────────────────┬───────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────┐
 │  SCREENING  (LangGraph StateGraph — 6 nodes)                 │
 │  [1] Planner      JD → search queries + scoring weights     │
-│  [2] Retriever    ChromaDB semantic search + dedup/rerank   │
-│  [3] Evaluator    LLM scores each candidate vs JD           │
+│  [2] Retriever    Full-pool ChromaDB search (no cap)        │
+│  [3] Evaluator    Parallel LLM scoring (6 workers)          │
 │  [4] Critique     Validates scores, flags who to interview  │
-│  [5] Synthesizer  Final ranked list                         │
-│  [6] IQ Generator Per-candidate tailored question bank      │
+│  [5] Synthesizer  Final ranked list + match_level labels    │
+│  [6] IQ Generator Parallel tailored questions (top 5)       │
+│  → Saved to MongoDB jobs collection with jd_hash            │
 └─────────────────────────────┬───────────────────────────────┘
-                              │  (recommended candidates only)
+                              │  sessions for:
+                              │  • top-5 recommended pool candidates
+                              │  • all uploaded Strong/Good Fit
 ┌─────────────────────────────▼───────────────────────────────┐
 │  INTERVIEW  (LangGraph StateGraph — 7 nodes + WebSocket)     │
 │  load_questions → ask_question → listen → evaluate          │
-│       ↑               │ TTS audio (edge-tts)                │
+│       ↑               │ TTS (edge-tts)                      │
 │       └── decide ◄────┘ STT (Whisper local or Groq API)     │
-│       (follow-up or next question)                          │
 │                      → report (verdict + scores)            │
+│  → Saved to MongoDB interview_reports collection            │
 └─────────────────────────────┬───────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────┐
 │  WEB UI  (FastAPI + HTML/JS — http://localhost:8001)         │
-│  POST /api/screen        upload resume + JD → run pipeline  │
-│  POST /api/submit-answer audio upload → STT → eval → WS     │
-│  WS   /ws/{session_id}   question flow + TTS + eval results │
+│  GET  /api/pool-count        candidate count + mongo status │
+│  GET  /api/jobs              past screening runs history    │
+│  GET  /api/jobs/{id}         full past run (read-only)      │
+│  GET  /api/reports           completed interview reports    │
+│  POST /api/screen            upload + JD → pipeline/fast   │
+│  POST /api/submit-answer     audio → STT → eval → WS push  │
+│  WS   /ws/{session_id}       question flow + TTS + results  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -97,48 +118,42 @@ For Groq: get a free key at https://console.groq.com/keys and add `GROQ_API_KEY=
 ```
 interview_agentic/
 │
-├── interview_app.py        Main entry point — FastAPI server
+├── interview_app.py        Main entry point — FastAPI + WebSocket server
 │                           STT_PROVIDER variable (top of file)
-│                           POST /api/screen, /api/submit-answer
-│                           WebSocket /ws/{session_id}
+│                           Fast path + full pipeline logic
+│                           Auto-interview for uploaded Good/Strong Fit
 │
 ├── ui.py                   Full dark-theme HTML/CSS/JS frontend
-│                           (imported by interview_app.py)
+│                           "Your Uploaded Candidates" highlight card
+│                           Full talent pool rankings table
+│                           Cached-run banner, past runs history
 │
-├── interview_simulator.py  LangGraph interview state machine
-│                           InterviewState, 7-node graph
-│                           _flatten_questions(), _parse_json()
+├── database.py             MongoDB integration (pymongo)
+│                           candidates / jobs / interview_reports
+│                           Candidate ID scheme, filename dedup,
+│                           JD hash deduplication
 │
-├── voice_io.py             TTS + STT classes
-│                           TextToSpeech  — edge-tts (free, no API key)
-│                           SpeechToText  — faster-whisper (local)
-│                           GroqSTT       — Groq Whisper API (cloud)
-│
-├── agentic_pipeline.py     Screening pipeline
-│                           PipelineState (TypedDict)
+├── agentic_pipeline.py     6-node LangGraph screening pipeline
 │                           CandidateVectorStore (ChromaDB)
-│                           AgentNodes (all 6 node methods)
-│                           ScreeningPipeline (facade)
+│                           Parallel evaluator + IQ generator
+│                           Full-pool retrieval
 │
-├── openrouter_client.py    OpenRouter API wrapper
-│                           call_llm(), extract_resume_from_text()
-│                           evaluate_candidate(), _dict_to_resume()
+├── interview_simulator.py  7-node LangGraph interview state machine
 │
-├── resume_parser.py        File → raw text extraction
-│                           PDF via PyPDF2, DOCX via python-docx
+├── voice_io.py             TTS (edge-tts) + STT (faster-whisper / Groq)
 │
-├── schemas.py              Resume dataclass hierarchy
-│                           ContactInfo, Experience, Education,
-│                           Skill, Project, Certification, Resume
-│                           (Python dataclasses — no Pydantic)
+├── openrouter_client.py    OpenRouter API wrapper (DeepSeek v4 Flash)
 │
-├── run_interview.py        CLI entry point (terminal-only)
+├── resume_parser.py        PDF/DOCX/TXT → raw text
 │
-├── main.py                 Legacy FastAPI endpoints (screening only)
+├── schemas.py              Resume dataclass hierarchy (no Pydantic)
+│
+├── seed_candidates.py      Populates ChromaDB + MongoDB with 49 synthetic
+│                           candidates across 4 tiers — run once
 │
 ├── chroma_db/              ChromaDB persistent storage (auto-created)
 ├── requirements.txt
-├── .env                    OPENROUTER_API_KEY, GROQ_API_KEY
+├── .env                    API keys + DB config
 ├── .env.example
 ├── TODO.md
 └── ARCHITECTURE.md
@@ -175,18 +190,45 @@ Each question includes `what_to_look_for` and a `follow_up` for shallow answers.
 
 ---
 
+## Candidate ID Scheme
+
+```
+Email: john.doe@gmail.com
+  base_id   : john_doe
+  doc_key   : john.doe@gmail.com  (MongoDB _id)
+  chroma_id : john_doe_1  (first resume)
+              john_doe_2  (second resume, different filename)
+
+No email:
+  base_id   : john_doe  (slugified name)
+  doc_key   : john_doe  (MongoDB _id)
+  chroma_id : john_doe_1, john_doe_2, ...
+
+Filename deduplication (same email, same filename):
+  ≥ 90% Jaccard similarity → skip, reuse existing chroma_id
+  <  90% Jaccard similarity → overwrite that sub_id in-place
+```
+
+---
+
 ## Environment Variables
 
 ```bash
 # Required
 OPENROUTER_API_KEY=sk-or-...       # openrouter.ai
-OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 
-# Required for ChromaDB path
+# Optional — for fast cloud STT
+GROQ_API_KEY=gsk_...               # console.groq.com/keys
+
+# Optional — for MongoDB persistence
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=interview_agentic
+
+# Optional — defaults to ./chroma_db
 CHROMA_DB_PATH=./chroma_db
 
-# Optional — only needed if STT_PROVIDER="groq"
-GROQ_API_KEY=gsk_...               # console.groq.com/keys
+# Optional — model override
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 ```
 
 ---
@@ -198,9 +240,10 @@ GROQ_API_KEY=gsk_...               # console.groq.com/keys
 | 1 JD × 1,000 resumes (first parse + screen) | ~$0.39 |
 | 1 JD × 1,000 resumes (already parsed, new JD) | ~$0.01 |
 | 10 JDs × 1,000 resumes (parse once) | ~$0.49 |
+| Same JD re-run + 1 new upload (fast path) | ~$0.001 |
 | 1 JD × 10,000 resumes | ~$3.64 |
 
-Ingestion is ~97% of cost and is one-time per resume. ChromaDB embeddings are fully local (zero cost).
+Ingestion is ~97% of cost and is one-time per resume. ChromaDB embeddings are fully local (zero cost). Fast-path re-runs cost near zero.
 
 ---
 
@@ -212,11 +255,19 @@ Ingestion is ~97% of cost and is one-time per resume. ChromaDB embeddings are fu
 | LLM | DeepSeek v4 Flash via OpenRouter |
 | Embeddings | all-MiniLM-L6-v2 (ChromaDB default, ONNX, local) |
 | Vector DB | ChromaDB 1.5.x, PersistentClient, cosine similarity |
-| Orchestration | LangGraph StateGraph |
+| Persistence | MongoDB 8.3.x, pymongo |
+| Orchestration | LangGraph StateGraph (6-node + 7-node) |
+| Parallelism | ThreadPoolExecutor (6 eval workers, 5 IQ workers) |
 | Data models | Python dataclasses (Python 3.14 compatible) |
 | TTS | edge-tts (Microsoft Edge neural voices, free) |
 | STT local | faster-whisper large-v3 (CPU/GPU) |
-| STT cloud | Groq Whisper large-v3 API (free tier) |
+| STT cloud | Groq Whisper large-v3 API (free tier, ~20x faster) |
 | Web API | FastAPI 0.115 + WebSockets |
 | Frontend | Vanilla HTML/CSS/JS (dark theme, no framework) |
 | Runtime | Python 3.14, Windows |
+
+---
+
+## Contact
+
+this.vishalchuhan@gmail.com
