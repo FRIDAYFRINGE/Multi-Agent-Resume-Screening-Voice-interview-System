@@ -1,349 +1,222 @@
 # Multi-Agent Resume Screening Assistant
 
-An intelligent, agentic RAG system for automated resume screening using LangGraph, ChromaDB, and FastAPI. The system intelligently decomposes screening queries, retrieves relevant candidates through semantic search, and validates evaluations before generating final rankings.
+An end-to-end agentic AI pipeline for resume screening and live voice interviews.  
+Parses resumes → screens candidates with a 6-node LangGraph pipeline → conducts a real-time voice interview with TTS questions and Whisper STT answers → produces a scored report with hiring verdict.
+
+---
+
+## What It Does
+
+1. **Upload** a resume (PDF/DOCX/TXT) and a job description
+2. **Screening pipeline** runs automatically:
+   - LLM extracts all resume fields into structured JSON
+   - ChromaDB indexes the candidate with sentence embeddings
+   - 6 LangGraph agents plan, retrieve, evaluate, critique, rank, and generate tailored interview questions
+3. **Live voice interview** starts in the browser:
+   - Questions are spoken aloud via Microsoft Edge TTS
+   - Candidate records answers (microphone)
+   - Whisper (local or Groq cloud) transcribes each answer
+   - LLM evaluates the answer and optionally asks a follow-up
+4. **Final report** with overall score, verdict (HIRE / STRONG HIRE / HOLD / REJECT), per-category scores, strengths, concerns, and full transcript
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure environment
+cp .env.example .env
+# Add your OPENROUTER_API_KEY (required)
+# Add your GROQ_API_KEY (optional — for fast cloud STT)
+
+# 3. Run
+python interview_app.py
+```
+
+Open **http://localhost:8001** in your browser.
+
+---
+
+## STT Provider
+
+Switch between local and cloud transcription with one line in `interview_app.py`:
+
+```python
+STT_PROVIDER = "local"   # faster-whisper large-v3, runs on CPU, free, slow (~1x real-time)
+STT_PROVIDER = "groq"    # Groq Whisper large-v3 API, free tier, ~20x faster
+```
+
+For Groq: get a free key at https://console.groq.com/keys and add `GROQ_API_KEY=...` to `.env`.
+
+---
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Resume Input                              │
-│            (PDF/DOCX/TXT) → PyMuPDF Extraction              │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Resume Parser (LLM-Based)                       │
-│         OpenRouter DeepSeek v4 Flash / Similar              │
-│  Extracts: Contact, Skills, Experience, Education, etc.     │
-│  Output: Structured JSON Resume                             │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Vector Database                             │
-│              ChromaDB - Semantic Search                      │
-│        (Embeddings + Similarity Search)                      │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-        ┌──────────────┴──────────────┐
-        │                             │
-        ▼                             ▼
-┌──────────────────┐         ┌──────────────────┐
-│  Planner Agent   │         │ Retrieval Agent  │
-│ Decomposes Query │         │ Semantic Search  │
-│ & Creates Plan   │         │  (ChromaDB)      │
-└──────────────────┘         └──────────────────┘
-        │                             │
-        └──────────────┬──────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────┐
-        │    Evaluation Agent         │
-        │ Score Candidates vs JD      │
-        │ (Structured Extraction)     │
-        └──────────────┬──────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────┐
-        │     Critique Agent          │
-        │ Validate Evaluations        │
-        │ Check Against JD            │
-        └──────────────┬──────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────┐
-        │   Final Rankings & Report   │
-        │   Sorted by Match Score     │
-        └─────────────────────────────┘
+│  INGESTION                                                   │
+│  PDF/DOCX/TXT → ResumeParser (PyPDF2) → raw text            │
+│              → OpenRouter LLM → Resume dataclass (JSON)     │
+│              → ChromaDB (all-MiniLM-L6-v2, cosine)          │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────┐
+│  SCREENING  (LangGraph StateGraph — 6 nodes)                 │
+│  [1] Planner      JD → search queries + scoring weights     │
+│  [2] Retriever    ChromaDB semantic search + dedup/rerank   │
+│  [3] Evaluator    LLM scores each candidate vs JD           │
+│  [4] Critique     Validates scores, flags who to interview  │
+│  [5] Synthesizer  Final ranked list                         │
+│  [6] IQ Generator Per-candidate tailored question bank      │
+└─────────────────────────────┬───────────────────────────────┘
+                              │  (recommended candidates only)
+┌─────────────────────────────▼───────────────────────────────┐
+│  INTERVIEW  (LangGraph StateGraph — 7 nodes + WebSocket)     │
+│  load_questions → ask_question → listen → evaluate          │
+│       ↑               │ TTS audio (edge-tts)                │
+│       └── decide ◄────┘ STT (Whisper local or Groq API)     │
+│       (follow-up or next question)                          │
+│                      → report (verdict + scores)            │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────┐
+│  WEB UI  (FastAPI + HTML/JS — http://localhost:8001)         │
+│  POST /api/screen        upload resume + JD → run pipeline  │
+│  POST /api/submit-answer audio upload → STT → eval → WS     │
+│  WS   /ws/{session_id}   question flow + TTS + eval results │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Features
+---
 
-- **Comprehensive Resume Parsing**: Extracts ALL fields including contact info, skills, experience, education, certifications, projects, languages, etc.
-- **JSON Output**: Structured JSON format for easy integration
-- **Multi-Format Support**: PDF, DOCX, TXT files
-- **Semantic Search**: ChromaDB-powered vector search for intelligent candidate retrieval
-- **Agentic Pipeline**: 
-  - Planner: Decomposes screening queries
-  - Retriever: Semantic search across candidates
-  - Evaluator: LLM-based candidate evaluation
-  - Critic: Validates evaluations against job requirements
-- **REST API**: FastAPI-based REST endpoints for easy integration
-- **Bulk Operations**: Upload and screen multiple candidates at once
+## File Structure
 
-## Components
-
-### 1. `schemas.py`
-Pydantic models for structured resume data:
-- `ContactInfo`: Name, email, phone, social profiles
-- `Education`: School, degree, field, dates, GPA
-- `Experience`: Company, position, dates, responsibilities, technologies
-- `Skill`: Skill categories and individual skills
-- `Certification`: Title, issuer, dates
-- `Project`: Title, description, technologies, URLs
-- `Language`: Language and proficiency
-- `Resume`: Complete resume object
-
-### 2. `resume_parser.py`
-Extracts text from resumes using PyMuPDF (and DOCX/TXT support):
-- `ResumeParser.extract_text_from_pdf()`: Extract text from PDF
-- `ResumeParser.extract_text_from_docx()`: Extract text from DOCX
-- `ResumeParser.extract_text_from_txt()`: Extract text from TXT
-- `ResumeParser.parse_resume()`: Main parsing method
-
-### 3. `openrouter_client.py`
-LLM integration via OpenRouter (DeepSeek v4 Flash):
-- `OpenRouterClient.call_llm()`: Generic LLM API calls
-- `OpenRouterClient.extract_resume_from_text()`: Parse resume text to JSON
-- `OpenRouterClient.evaluate_candidate()`: Score candidate vs job description
-
-### 4. `agentic_pipeline.py`
-Multi-agent screening system:
-- **PlannerAgent**: Decomposes screening query into search strategies
-- **RetrievalAgent**: Semantic search using ChromaDB
-- **CritiqueAgent**: Validates evaluations
-- **ScreeningPipeline**: Orchestrates the complete flow
-
-### 5. `main.py`
-FastAPI REST server with endpoints:
-- `POST /upload-resume`: Upload and parse single resume
-- `POST /parse-resume-text`: Parse resume from raw text
-- `POST /bulk-upload`: Upload multiple resumes
-- `POST /screen-candidates`: Run full screening pipeline
-- `GET /candidates`: List all candidates
-- `GET /candidate/{id}`: Get candidate details
-- `POST /evaluate-candidate/{id}`: Evaluate single candidate
-
-## Installation
-
-1. **Clone and setup**:
-```bash
-cd interview_agentic
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+interview_agentic/
+│
+├── interview_app.py        Main entry point — FastAPI server
+│                           STT_PROVIDER variable (top of file)
+│                           POST /api/screen, /api/submit-answer
+│                           WebSocket /ws/{session_id}
+│
+├── ui.py                   Full dark-theme HTML/CSS/JS frontend
+│                           (imported by interview_app.py)
+│
+├── interview_simulator.py  LangGraph interview state machine
+│                           InterviewState, 7-node graph
+│                           _flatten_questions(), _parse_json()
+│
+├── voice_io.py             TTS + STT classes
+│                           TextToSpeech  — edge-tts (free, no API key)
+│                           SpeechToText  — faster-whisper (local)
+│                           GroqSTT       — Groq Whisper API (cloud)
+│
+├── agentic_pipeline.py     Screening pipeline
+│                           PipelineState (TypedDict)
+│                           CandidateVectorStore (ChromaDB)
+│                           AgentNodes (all 6 node methods)
+│                           ScreeningPipeline (facade)
+│
+├── openrouter_client.py    OpenRouter API wrapper
+│                           call_llm(), extract_resume_from_text()
+│                           evaluate_candidate(), _dict_to_resume()
+│
+├── resume_parser.py        File → raw text extraction
+│                           PDF via PyPDF2, DOCX via python-docx
+│
+├── schemas.py              Resume dataclass hierarchy
+│                           ContactInfo, Experience, Education,
+│                           Skill, Project, Certification, Resume
+│                           (Python dataclasses — no Pydantic)
+│
+├── run_interview.py        CLI entry point (terminal-only)
+│
+├── main.py                 Legacy FastAPI endpoints (screening only)
+│
+├── chroma_db/              ChromaDB persistent storage (auto-created)
+├── requirements.txt
+├── .env                    OPENROUTER_API_KEY, GROQ_API_KEY
+├── .env.example
+├── TODO.md
+└── ARCHITECTURE.md
 ```
 
-2. **Install dependencies**:
-```bash
-pip install -r requirements.txt
-```
-
-3. **Configure environment**:
-```bash
-cp .env.example .env
-# Edit .env and add your OPENROUTER_API_KEY
-```
-
-Get your OpenRouter API key from [openrouter.ai](https://openrouter.ai)
-
-## Usage
-
-### Option 1: Command-line Examples
-
-```bash
-python example_usage.py
-```
-
-This runs three examples:
-1. Parse a single resume
-2. Screen multiple candidates (agentic pipeline)
-3. Evaluate a single candidate
-
-### Option 2: FastAPI Server
-
-```bash
-python main.py
-```
-
-Server starts at `http://localhost:8000`
-
-Interactive API docs: `http://localhost:8000/docs`
-
-**Example requests**:
-
-```bash
-# Upload a resume
-curl -X POST "http://localhost:8000/upload-resume" \
-  -F "file=@resume.pdf" \
-  -F "candidate_id=john_doe"
-
-# Parse resume from text
-curl -X POST "http://localhost:8000/parse-resume-text" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "John Doe...", "candidate_id": "john"}'
-
-# Run screening pipeline
-curl -X POST "http://localhost:8000/screen-candidates" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_description": "Senior Python Developer...",
-    "required_skills": ["Python", "Django", "React"],
-    "min_experience_years": 5
-  }'
-
-# List all candidates
-curl "http://localhost:8000/candidates"
-
-# Get candidate details
-curl "http://localhost:8000/candidate/john_doe"
-```
-
-### Option 3: Python Integration
-
-```python
-from resume_parser import ResumeParser
-from openrouter_client import OpenRouterClient
-from agentic_pipeline import ScreeningPipeline, ScreeningQuery
-
-# Initialize
-parser = ResumeParser()
-llm = OpenRouterClient(api_key="your_key")
-pipeline = ScreeningPipeline(api_key="your_key")
-
-# Parse resume
-resume = parser.parse_resume("resume.pdf", llm)
-
-# Add to pipeline
-pipeline.add_candidate(resume, "candidate_1")
-
-# Screen
-query = ScreeningQuery(
-    job_description="Senior Developer needed",
-    required_skills=["Python", "JavaScript"],
-    min_experience_years=5
-)
-state = pipeline.screen_candidates(query)
-
-# Get results
-for ranking in state.final_rankings:
-    print(f"Rank {ranking['rank']}: {ranking['match_score']}/100")
-```
+---
 
 ## Resume Fields Extracted
 
-The system extracts and structures:
+| Section | Fields |
+|---|---|
+| Contact | name, email, phone, address, city, state, country, linkedin, github, portfolio, website |
+| Profile | professional_summary |
+| Skills | category + skills[] (grouped) |
+| Experience | company, position, employment_type, dates, location, description, achievements[], technologies[] |
+| Education | institution, degree, field_of_study, dates, gpa, activities |
+| Certifications | title, issuer, date_obtained, expiration, url |
+| Projects | title, description, technologies[], url |
+| Other | languages, publications, volunteer_experience, awards_recognition |
 
-### Contact Information
-- Name, email, phone
-- Address, city, state, country
-- LinkedIn, GitHub, portfolio, website
+---
 
-### Professional Profile
-- Professional summary
-- Skills (categorized)
-- Languages and proficiency levels
+## Interview Question Categories
 
-### Experience
-- Company, position, employment type
-- Start/end dates, location
-- Job description, achievements
-- Technologies used
+| Category | Description |
+|---|---|
+| Technical Depth | Tests depth of key skills from resume |
+| Gap Probing | Targets specific weaknesses vs JD |
+| Project-Specific | Questions tied to named projects in resume |
+| System Design | Role-relevant architecture questions |
+| Behavioral | Grounded in actual resume gaps and context |
 
-### Education
-- Institution, degree, field of study
-- Start/end dates, GPA
-- Activities, additional description
+Each question includes `what_to_look_for` and a `follow_up` for shallow answers.
 
-### Additional
-- Certifications (title, issuer, dates)
-- Projects (title, description, technologies, URLs)
-- Publications
-- Volunteer experience
-- Awards and recognition
-
-## JSON Output Format
-
-```json
-{
-  "contact_info": {
-    "name": "John Doe",
-    "email": "john@example.com",
-    "phone": "+1-555-123-4567",
-    "linkedin": "linkedin.com/in/johndoe",
-    "github": "github.com/johndoe"
-  },
-  "professional_summary": "...",
-  "skills": [
-    {
-      "category": "Programming Languages",
-      "skills": ["Python", "JavaScript", "TypeScript"]
-    }
-  ],
-  "experience": [
-    {
-      "company": "Tech Corp",
-      "position": "Senior Engineer",
-      "start_date": "2021-01",
-      "end_date": "Present",
-      "technologies": ["Python", "React", "AWS"],
-      "achievements": ["Led team of 5", "Improved performance by 40%"]
-    }
-  ],
-  "education": [
-    {
-      "institution": "IIT Bombay",
-      "degree": "Bachelor of Technology",
-      "field_of_study": "Computer Science",
-      "gpa": "3.8/4.0"
-    }
-  ]
-}
-```
-
-## Screening Pipeline Flow
-
-1. **Intake**: Job description, required skills, experience level
-2. **Planning**: LLM decomposes query into semantic search queries
-3. **Retrieval**: ChromaDB finds relevant candidates
-4. **Evaluation**: Each candidate scored against JD
-5. **Critique**: Validations against requirements
-6. **Ranking**: Final sorted list with recommendations
+---
 
 ## Environment Variables
 
-```
-OPENROUTER_API_KEY=your_api_key
-OPENROUTER_MODEL=deepseek/deepseek-chat
+```bash
+# Required
+OPENROUTER_API_KEY=sk-or-...       # openrouter.ai
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
+
+# Required for ChromaDB path
 CHROMA_DB_PATH=./chroma_db
+
+# Optional — only needed if STT_PROVIDER="groq"
+GROQ_API_KEY=gsk_...               # console.groq.com/keys
 ```
 
-## Performance Notes
+---
 
-- **ChromaDB**: Uses DuckDB backend with cosine similarity
-- **Embeddings**: Generated by OpenRouter's embedding models
-- **LLM**: DeepSeek v4 Flash for speed and cost-efficiency
-- **Scalability**: Can handle 1000+ candidates efficiently
+## Cost Estimate (DeepSeek V3 via OpenRouter)
 
-## Future Enhancements
+| Scenario | Cost |
+|---|---|
+| 1 JD × 1,000 resumes (first parse + screen) | ~$0.39 |
+| 1 JD × 1,000 resumes (already parsed, new JD) | ~$0.01 |
+| 10 JDs × 1,000 resumes (parse once) | ~$0.49 |
+| 1 JD × 10,000 resumes | ~$3.64 |
 
-- [ ] Interview question generation
-- [ ] Automated email candidate outreach
-- [ ] Interview scheduling
-- [ ] Collaboration features (reviewer notes)
-- [ ] Custom evaluation rubrics
-- [ ] Bias detection in screening
-- [ ] Resume quality scoring
-- [ ] Competitive analysis (comparing candidates)
+Ingestion is ~97% of cost and is one-time per resume. ChromaDB embeddings are fully local (zero cost).
 
-## Troubleshooting
+---
 
-**"OPENROUTER_API_KEY not set"**
-- Add to .env file or export as environment variable
+## Tech Stack
 
-**"Failed to parse LLM response as JSON"**
-- The LLM may have returned malformed JSON. Retry or adjust prompt.
-
-**ChromaDB connection issues**
-- Ensure `./chroma_db` directory is writable
-
-**Resume parsing errors**
-- Ensure file is valid PDF/DOCX/TXT
-- Check file is not corrupted
-
-## License
-
-MIT
-
-## Contact
-
-For issues and questions, contact: chauhan.vkalidas.chy20@itbhu.ac.in
+| Layer | Technology |
+|---|---|
+| File parsing | PyPDF2, python-docx |
+| LLM | DeepSeek v4 Flash via OpenRouter |
+| Embeddings | all-MiniLM-L6-v2 (ChromaDB default, ONNX, local) |
+| Vector DB | ChromaDB 1.5.x, PersistentClient, cosine similarity |
+| Orchestration | LangGraph StateGraph |
+| Data models | Python dataclasses (Python 3.14 compatible) |
+| TTS | edge-tts (Microsoft Edge neural voices, free) |
+| STT local | faster-whisper large-v3 (CPU/GPU) |
+| STT cloud | Groq Whisper large-v3 API (free tier) |
+| Web API | FastAPI 0.115 + WebSockets |
+| Frontend | Vanilla HTML/CSS/JS (dark theme, no framework) |
+| Runtime | Python 3.14, Windows |

@@ -2,10 +2,11 @@
 
 ## Overview
 
-Multi-agent RAG system for resume screening. Accepts raw resume files, structures
-them into JSON, embeds them into ChromaDB, then runs a LangGraph StateGraph where
-specialized agents plan, retrieve, evaluate, critique, rank, and generate tailored
-interview questions — all driven by a job description.
+End-to-end multi-agent system for resume screening and live voice interviews.
+Accepts raw resume files, structures them into JSON, embeds into ChromaDB, runs
+a 6-node LangGraph screening pipeline, then hands off recommended candidates to
+a 7-node LangGraph interview simulator with real-time TTS/STT via a FastAPI
+WebSocket UI.
 
 ---
 
@@ -330,8 +331,180 @@ interview questions — all driven by a job description.
 START → planner → retriever → evaluator → critique → synthesizer → interview_questions → END
 ```
 
-All edges are deterministic (no conditional branching currently).
+All edges are deterministic (no conditional branching).
 State flows through every node in sequence.
+
+---
+
+## Interview Simulator — LangGraph State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     INTERVIEW STATE MACHINE                              │
+│                                                                         │
+│  Triggered for each candidate in interview_questions{}                  │
+│  (i.e. recommended_for_interview = True only)                           │
+│                                                                         │
+│  InterviewState (TypedDict)                                             │
+│  ┌──────────────────────────────────────────────┐                      │
+│  │  candidate_id        str                     │                      │
+│  │  candidate_name      str                     │                      │
+│  │  job_description     str                     │                      │
+│  │  question_queue      List[Dict]   flat list  │                      │
+│  │  current_idx         int                     │                      │
+│  │  current_question    Optional[Dict]          │                      │
+│  │  follow_up_count     int                     │                      │
+│  │  max_follow_ups      int  (configurable)     │                      │
+│  │  last_answer         str                     │                      │
+│  │  transcript          List[Dict]  (+add)      │                      │
+│  │  answer_scores       List[Dict]  (+add)      │                      │
+│  │  is_complete         bool                    │                      │
+│  │  final_report        Optional[Dict]          │                      │
+│  └──────────────────────────────────────────────┘                      │
+│                                                                         │
+│  Question queue is flattened from 5 categories in this order:          │
+│    technical_depth → gap_probing → project_specific →                  │
+│    system_design → behavioral                                           │
+│                                                                         │
+│  START                                                                  │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [1] load_questions    Flatten IQ dict → ordered question_queue        │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [2] ask_question      Pop current Q, send via TTS or WebSocket        │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [3] listen            Receive audio → Whisper STT → text              │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [4] evaluate          LLM scores answer 1–10, hits/misses,            │
+│                        needs_follow_up flag                             │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [5] decide  ──────────────────────────────────────────────────────►   │
+│    │  needs_follow_up AND follow_up_count < max_follow_ups?            │
+│    │    YES → inject follow_up Q at current_idx+1 → ask_question       │
+│    │    NO  → advance current_idx                                       │
+│    │  more questions?                                                   │
+│    │    YES → ask_question                                              │
+│    │    NO  → report                                                    │
+│    │                                                                    │
+│    ▼                                                                    │
+│  [6] report            LLM generates final assessment:                 │
+│                          overall_score, verdict, category_scores,      │
+│                          top_strengths, key_concerns, recommendation   │
+│    │                                                                    │
+│   END                                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Voice I/O Layer
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          VOICE I/O  (voice_io.py)                       │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  TextToSpeech  (edge-tts)                                       │   │
+│  │                                                                 │   │
+│  │  Voice   : en-US-GuyNeural (Microsoft Edge neural)              │   │
+│  │  Cost    : Free (uses Edge cloud endpoint, no API key)          │   │
+│  │  Output  : MP3 bytes streamed async → base64 → WebSocket        │   │
+│  │  Latency : ~500ms for a typical question (~20 words)            │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  SpeechToText  (faster-whisper — local)                         │   │
+│  │                                                                 │   │
+│  │  Model   : large-v3  (3GB, downloaded once, cached)            │   │
+│  │  Device  : CPU (int8 quantized)                                 │   │
+│  │  Speed   : ~0.5–1× real-time on CPU                            │   │
+│  │  Options : vad_filter=True, condition_on_previous_text=False    │   │
+│  │            initial_prompt = domain vocab + current question     │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  GroqSTT  (Groq cloud — alternative)                            │   │
+│  │                                                                 │   │
+│  │  Model   : whisper-large-v3 (same model, cloud GPU)             │   │
+│  │  Cost    : Free tier — 28,800s audio/day (~8 hours)            │   │
+│  │  Speed   : ~5s for 2min audio (~20× faster than local CPU)     │   │
+│  │  API     : POST https://api.groq.com/openai/v1/audio/          │   │
+│  │            transcriptions  (OpenAI-compatible format)           │   │
+│  │  Key     : GROQ_API_KEY in .env                                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  Switch: STT_PROVIDER = "local" | "groq"  (interview_app.py line 28)  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Web UI Layer — FastAPI + WebSocket
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   WEB UI  (interview_app.py + ui.py)                    │
+│                                                                         │
+│  Server: uvicorn  http://0.0.0.0:8001                                   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  GET  /                                                         │   │
+│  │    Serves dark-theme single-page HTML/CSS/JS from ui.py         │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  POST /api/screen   multipart/form-data                         │   │
+│  │    Fields: resume (file), jd (str), skills (str),              │   │
+│  │            max_follow_ups (int)                                 │   │
+│  │    Flow:                                                        │   │
+│  │      ResumeParser → OpenRouter LLM → ChromaDB index            │   │
+│  │      → ScreeningPipeline (6-node LangGraph)                     │   │
+│  │      → _flatten_questions() → session stored in memory          │   │
+│  │    Returns: {session_id, candidate_name, match_score,           │   │
+│  │              total_questions}                                    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  POST /api/submit-answer   multipart/form-data                  │   │
+│  │    Fields: audio (WAV file), session_id, question_idx           │   │
+│  │    Flow:                                                        │   │
+│  │      WAV → STT (local Whisper or Groq API)                      │   │
+│  │      → silence guard (< 4 words → score=0, skip LLM)           │   │
+│  │      → LLM evaluation (score, hits, misses, needs_follow_up)   │   │
+│  │      → push via WebSocket                                       │   │
+│  │    Audio encoding: browser converts WebM→WAV via AudioContext   │   │
+│  │    (native sample rate, no ffmpeg)                              │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  WebSocket /ws/{session_id}                                     │   │
+│  │                                                                 │   │
+│  │  Client → Server messages:                                      │   │
+│  │    {type: "start"}   → triggers send_question()                 │   │
+│  │    {type: "next"}    → advance idx → send_question() or finish  │   │
+│  │                                                                 │   │
+│  │  Server → Client messages:                                      │   │
+│  │    {type: "question", idx, category, question, gap}             │   │
+│  │    {type: "tts_audio", audio_b64}   base64 MP3                  │   │
+│  │    {type: "transcription", text}    raw Whisper output          │   │
+│  │    {type: "evaluation", evaluation} score + hits/misses         │   │
+│  │    {type: "report", report}         final assessment            │   │
+│  │    {type: "status", text, color}    status bar updates          │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  Session state (in-memory dict):                                        │
+│    candidate_id, candidate_name, job_description                        │
+│    question_queue: List[Dict]   (flat, follow-ups injected inline)     │
+│    current_idx: int                                                     │
+│    follow_up_count: int,  max_follow_ups: int                          │
+│    transcript: List[Dict],  answer_scores: List[Dict]                  │
+│    ws: WebSocket reference,  stt: STT instance (cached per session)    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -378,42 +551,55 @@ ScreeningQuery (JD + filters)
 ```
 interview_agentic/
 │
-├── schemas.py              Resume dataclass hierarchy (ContactInfo,
-│                           Experience, Education, Skill, Project,
-│                           Certification, Language, Resume)
+├── interview_app.py        Main entry point — FastAPI + WebSocket server
+│                           STT_PROVIDER = "local" | "groq"  (line 28)
+│                           POST /api/screen, /api/submit-answer
+│                           WebSocket /ws/{session_id}
+│                           In-memory session store
+│
+├── ui.py                   Full dark-theme single-page frontend
+│                           HTML + CSS + JS as HTML string constant
+│                           (imported by interview_app.py)
+│
+├── interview_simulator.py  LangGraph 7-node interview state machine
+│                           InterviewState (TypedDict)
+│                           _flatten_questions() — 5-category ordering
+│                           _parse_json() — robust JSON extraction
+│
+├── voice_io.py             Voice I/O classes
+│                           TextToSpeech  — edge-tts (free, no API key)
+│                           SpeechToText  — faster-whisper (local CPU/GPU)
+│                           GroqSTT       — Groq cloud Whisper large-v3
+│
+├── agentic_pipeline.py     Screening pipeline
+│                           PipelineState (TypedDict)
+│                           CandidateVectorStore (ChromaDB)
+│                           AgentNodes (all 6 LangGraph nodes)
+│                           build_screening_graph() → compiled graph
+│                           ScreeningPipeline (facade class)
+│
+├── openrouter_client.py    OpenRouter API wrapper
+│                           call_llm(), extract_resume_from_text()
+│                           evaluate_candidate(), _dict_to_resume()
 │
 ├── resume_parser.py        File → raw text extraction
 │                           PDF via PyPDF2, DOCX via python-docx
 │
-├── openrouter_client.py    OpenRouter API wrapper
-│                           call_llm(), extract_resume_from_text(),
-│                           evaluate_candidate(), _dict_to_resume()
+├── schemas.py              Resume dataclass hierarchy
+│                           ContactInfo, Experience, Education, Skill
+│                           Project, Certification, Language, Resume
+│                           Python dataclasses (no Pydantic — Py 3.14)
 │
-├── agentic_pipeline.py     Core pipeline
-│                           PipelineState (TypedDict)
-│                           CandidateVectorStore (ChromaDB)
-│                           AgentNodes (all 6 node methods)
-│                           build_screening_graph() → compiled graph
-│                           ScreeningPipeline (facade)
-│
-├── main.py                 FastAPI server
-│                           POST /upload-resume
-│                           POST /parse-resume-text
-│                           POST /bulk-upload
-│                           POST /screen-candidates
-│                           POST /evaluate-candidate/{id}
-│                           GET  /candidates
-│                           GET  /candidate/{id}
-│
-├── example_usage.py        CLI demo script
+├── run_interview.py        CLI entry point (terminal-only, no browser)
+├── main.py                 Legacy FastAPI screening-only endpoints
+├── example_usage.py        CLI demo / smoke test script
 │
 ├── chroma_db/              ChromaDB persistent storage (auto-created)
 │
-├── requirements.txt        fastapi, uvicorn, langgraph, chromadb,
-│                           PyPDF2, python-docx, python-dotenv, requests
-│
-├── .env                    OPENROUTER_API_KEY, OPENROUTER_MODEL
-├── TODO.md                 Feature backlog
+├── requirements.txt        All dependencies
+├── .env                    OPENROUTER_API_KEY, GROQ_API_KEY, CHROMA_DB_PATH
+├── .env.example            Template for new setups
+├── TODO.md                 Feature backlog + pipeline architecture
 └── ARCHITECTURE.md         This file
 ```
 
@@ -553,15 +739,26 @@ Layer               Technology              Purpose
 File parsing        PyPDF2, python-docx     Extract raw text
 LLM                 DeepSeek v4 Flash       Structured extraction,
                     via OpenRouter          evaluation, critique,
-                                            interview questions
+                                            interview Q generation,
+                                            answer scoring, reports
 Embeddings          all-MiniLM-L6-v2        384-dim sentence embeddings
-                    (ChromaDB default)      via ONNX runtime
+                    (ChromaDB default)      via ONNX runtime (local)
 Vector DB           ChromaDB 1.5.x          Persistent cosine search
                     PersistentClient        HNSW index
-Orchestration       LangGraph 1.2.x         StateGraph, typed state,
-                                            Annotated reducers
+Orchestration       LangGraph 1.2.x         Two StateGraphs — screening
+                                            pipeline + interview loop
 Data models         Python dataclasses      Resume schema, no Pydantic
                                             (Python 3.14 compat)
-API                 FastAPI 0.115.x         REST endpoints
+TTS                 edge-tts                Microsoft Edge neural voices
+                                            Free, no API key, async MP3
+STT (local)         faster-whisper          Whisper large-v3 on CPU
+                                            VAD filter, initial_prompt
+STT (cloud)         Groq Whisper API        Same model on cloud GPU
+                                            28,800s/day free, ~20x faster
+Audio (browser)     Web Audio API           WebM → WAV via AudioContext
+                    MediaRecorder           No ffmpeg dependency
+API + WebSocket     FastAPI 0.115.x         REST + real-time interview
+                    uvicorn                 WebSocket message passing
+Frontend            Vanilla HTML/CSS/JS     Dark-theme SPA, no framework
 Runtime             Python 3.14, Windows    Local dev
 ```

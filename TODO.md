@@ -6,51 +6,39 @@
 PDF/DOCX/TXT
      │
      ▼
-ResumeParser (PyPDF2)
+ResumeParser (PyPDF2 / python-docx)
      │  extracts raw text
      ▼
 OpenRouterClient → DeepSeek v4 Flash
-     │  LLM structures text into Resume JSON
+     │  LLM structures text into Resume dataclass (JSON)
      ▼
 ChromaDB (PersistentClient)
      │  all-MiniLM-L6-v2 embeddings, cosine similarity
      ▼
-══════════════════ LangGraph StateGraph ══════════════════
+══════════════════ LangGraph StateGraph (Screening) ══════════════════
      │
-     ├── [1] Planner Node
-     │       Decomposes JD into search queries, scoring
-     │       weights, hard requirements, nice-to-haves
-     │
-     ├── [2] Retriever Node
-     │       Runs each search query against ChromaDB
-     │       Deduplicates + reranks by cosine similarity
-     │
-     ├── [3] Evaluator Node
-     │       Scores each candidate vs JD
-     │       Outputs: match_score, strengths, weaknesses,
-     │       matched/missing skills, recommendation
-     │
-     ├── [4] Critique Node
-     │       Validates scores for consistency
-     │       Applies adjustments, flags recommended candidates
-     │
-     ├── [5] Synthesizer Node
-     │       Final ranked list sorted by match_score
-     │       Marks recommended_for_interview = true/false
-     │
-     └── [6] Interview Question Generator Node
-             Fires only for recommended candidates
-             Generates per-candidate tailored questions:
-             - Technical depth (with follow-ups)
-             - Gap probing (tied to specific weaknesses)
-             - Project-specific (from their actual resume)
-             - System design (role-relevant)
-             - Behavioral (grounded in real gaps)
-══════════════════════════════════════════════════════════
+     ├── [1] Planner Node        JD → search queries + scoring weights
+     ├── [2] Retriever Node      ChromaDB semantic search + dedup/rerank
+     ├── [3] Evaluator Node      LLM scores each candidate vs JD
+     ├── [4] Critique Node       Validates scores, flags recommended
+     ├── [5] Synthesizer Node    Final ranked list
+     └── [6] IQ Generator Node   Per-candidate tailored interview questions
+══════════════════════════════════════════════════════════════════════
      │
      ▼
-FastAPI Server (main.py)
-     REST endpoints for upload, parse, screen, evaluate
+══════════════════ LangGraph StateGraph (Interview) ══════════════════
+     │
+     ├── load_questions          Flatten 5-category question bank
+     ├── ask_question            Send Q via WebSocket + TTS audio
+     ├── listen                  Receive audio → Whisper STT
+     ├── evaluate                LLM scores answer (1–10)
+     ├── decide                  Follow-up or next question
+     └── report                  Final verdict, category scores, transcript
+══════════════════════════════════════════════════════════════════════
+     │
+     ▼
+FastAPI + WebSocket UI (interview_app.py)
+     Dark-theme single-page app served at http://localhost:8001
 ```
 
 ---
@@ -61,9 +49,10 @@ FastAPI Server (main.py)
 - [x] LLM-based structured extraction — all fields to JSON
       (contact, skills, experience, education, certifications,
        projects, languages, publications, awards)
+- [x] Python dataclass schema — Python 3.14 compatible (no Pydantic)
 - [x] ChromaDB vector store — persistent, cosine similarity,
       all-MiniLM-L6-v2 embeddings
-- [x] LangGraph StateGraph — 6-node typed pipeline with
+- [x] LangGraph StateGraph (screening) — 6-node typed pipeline with
       Annotated reducers for list accumulation
 - [x] Planner agent — decomposes JD into search strategy
 - [x] Retriever agent — semantic search, dedup, rerank
@@ -71,39 +60,57 @@ FastAPI Server (main.py)
 - [x] Critique agent — consistency validation + score adjustment
 - [x] Synthesizer — final ranked list
 - [x] Interview question generator — 5 categories, tailored
-      per candidate based on their actual resume + gaps
-- [x] FastAPI server — upload, parse, screen, evaluate endpoints
-- [x] Bulk resume upload endpoint
+      per candidate (technical depth, gap probing, project-specific,
+      system design, behavioral)
+- [x] LangGraph StateGraph (interview simulator) — 7-node loop:
+      load → ask → listen → evaluate → decide → follow-up → report
+- [x] Follow-up injection — shallow answers trigger follow-up Q
+      spliced into queue dynamically
+- [x] TTS — edge-tts (Microsoft neural, en-US-GuyNeural, free)
+      streamed to browser as base64 MP3 via WebSocket
+- [x] STT (local) — faster-whisper large-v3, VAD filter,
+      domain initial_prompt, condition_on_previous_text=False
+- [x] STT (cloud) — Groq Whisper large-v3 API (~20x faster than CPU)
+      switchable via STT_PROVIDER = "local" | "groq" in interview_app.py
+- [x] Browser audio — MediaRecorder (WebM) → AudioContext WAV
+      conversion client-side, no ffmpeg dependency
+- [x] FastAPI web UI — dark-theme single-page HTML/JS
+      served at GET /, WebSocket /ws/{session_id}
+- [x] POST /api/screen — upload resume + JD → full pipeline → session
+- [x] POST /api/submit-answer — audio upload → STT → LLM eval → WS push
+- [x] Silence guard — sub-4-word answers score 0 without LLM call
+- [x] Final report — verdict (HIRE/STRONG_HIRE/HOLD/REJECT),
+      category scores, strengths, concerns, full transcript
+- [x] UI/backend separation — HTML/CSS/JS in ui.py, logic in interview_app.py
 - [x] OpenRouter integration — DeepSeek v4 Flash
 
 ---
 
 ## What's Next
 
-### Interview Simulator (Priority: High)
-- [ ] LangGraph loop: ask → answer → evaluate → follow-up or next
-- [ ] CLI interface: interactive Q&A session in terminal
-- [ ] Answer evaluator: scores each response against expected signal
-- [ ] Follow-up decision: if answer is shallow, probe deeper
-- [ ] Final interview report: per-question scores + overall verdict
-
-### FastAPI Enhancements (Priority: Medium)
-- [ ] Wire all pipeline stages to REST endpoints
-- [ ] `POST /interview/start/{candidate_id}` — kick off session
-- [ ] `POST /interview/answer` — submit answer, get next question
-- [ ] `GET /interview/report/{session_id}` — final assessment
-- [ ] WebSocket support for real-time interview streaming
+### STT Quality (Priority: High)
+- [ ] Test Groq STT accuracy vs local large-v3 on Indian English accent
+- [ ] Groq: validate API key whitespace handling in .env
+- [ ] Consider adding display of raw vs cleaned transcription toggle in UI
 
 ### Storage & Persistence (Priority: Medium)
-- [ ] Persist candidate store across server restarts (SQLite/JSON)
-- [ ] Session tracking for multi-candidate interview runs
-- [ ] Store screening + interview results to disk
+- [ ] Persist sessions to disk (currently in-memory, lost on server restart)
+- [ ] Store final interview reports as JSON to ./reports/
+- [ ] Add GET /report/{session_id} download endpoint
+- [ ] SQLite for candidate + session tracking across restarts
+
+### UI Enhancements (Priority: Medium)
+- [ ] Interview report download button (PDF or JSON)
+- [ ] Progress indicator showing estimated transcription time
+- [ ] Allow restarting interview without re-running screening
+- [ ] Show raw Whisper text alongside evaluated text for transparency
 
 ### Reranking (Priority: Low)
 - [ ] Add cross-encoder reranker after ChromaDB retrieval
-      (e.g. ms-marco-MiniLM reranker via sentence-transformers)
-- [ ] Score fusion: combine semantic similarity + LLM eval score
+      (ms-marco-MiniLM via sentence-transformers)
+- [ ] Score fusion: semantic similarity + LLM eval score
 
-### Output (Priority: Low)
-- [ ] Candidate PDF report (screening summary for hiring manager)
-- [ ] Export interview questions to structured JSON/PDF per candidate
+### Scaling (Priority: Low)
+- [ ] Parallel evaluator — asyncio.gather() for N candidate LLM calls
+- [ ] Batch resume ingestion endpoint
+- [ ] Candidate PDF report export for hiring manager
