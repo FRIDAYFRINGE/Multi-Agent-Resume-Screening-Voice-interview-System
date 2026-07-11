@@ -29,7 +29,7 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 │            ▼                                                            │
 │   ┌──────────────────────┐                                              │
 │   │  OpenRouterClient    │  POST /chat/completions                      │
-│   │  (openrouter_        │  Model: deepseek/deepseek-v4-flash           │
+│   │  (openrouter_        │  Model: deepseek/deepseek-chat-v3-0324 (V3)          │
 │   │   client.py)         │  → Resume dataclass (JSON)                  │
 │   └──────────┬───────────┘                                              │
 │              │                                                          │
@@ -97,12 +97,17 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 │                                                                         │
 │  ┌─ Same JD + uploads present ──────────────────────────────────┐      │
 │  │  FAST PATH (~10-15s)                                         │      │
-│  │  1. Evaluate uploaded candidates only (parallel, ≤5 workers) │      │
-│  │  2. Load cached pool rankings from MongoDB jobs collection   │      │
-│  │  3. Merge + re-sort by match_score + re-rank                 │      │
-│  │  4. Attach match_level labels                                │      │
-│  │  5. Create sessions: uploaded Good/Strong Fit + top-5 pool  │      │
-│  │  6. Return {rankings, sessions, reused_job_id, reused_date,  │      │
+│  │  1. Pre-dedup: raw text → email regex → MongoDB filename     │      │
+│  │     lookup → Jaccard ≥ 0.85 on raw text → skip LLM parse    │      │
+│  │  2. Evaluate new uploads only (parallel, ≤5 workers)        │      │
+│  │  3. CE + vector signals computed for uploaded candidates     │      │
+│  │  4. Load cached pool rankings from MongoDB jobs collection   │      │
+│  │  5. Merge + rrf_fuse() if all entries have ce_score,        │      │
+│  │     else fallback to plain match_score sort (legacy compat)  │      │
+│  │  6. Attach match_level labels                                │      │
+│  │  7. Sessions: uploaded Good/Strong Fit (upfront IQ) +       │      │
+│  │     top-5 pool (lazy IQ via /api/prepare-interview)         │      │
+│  │  8. Return {rankings, sessions, reused_job_id, reused_date, │      │
 │  │            pool_changed, old_pool_size}                      │      │
 │  └──────────────────────────────────────────────────────────────┘      │
 │                                                                         │
@@ -130,6 +135,8 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 │  │  plan                   Optional[dict]      ──── │── written by [1] │
 │  │  search_queries         List[str]           ──── │── written by [1] │
 │  │  retrieved_ids          List[str]           ──── │── written by [2] │
+│  │  retrieved_similarities Dict[str,float]     ──── │── written by [2] │
+│  │  ce_scores              Dict[str,float]     ──── │── written by [2] │
 │  │  evaluations            List[dict]  (+add)  ──── │── written by [3] │
 │  │  critique               Optional[dict]      ──── │── written by [4] │
 │  │  final_rankings         List[dict]          ──── │── written by [5] │
@@ -152,7 +159,7 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 │  [1] PLANNER NODE                                                │
 │                                                                  │
 │  Role    : Decompose the job description into a search strategy  │
-│  Agent   : LLM (DeepSeek v4 Flash), temp=0.2                    │
+│  Agent   : LLM (DeepSeek V4 Pro), temp=0.1, cached by JD hash   │
 │                                                                  │
 │  OUTPUT (writes to state)                                        │
 │    plan: {                                                       │
@@ -170,18 +177,21 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 ┌──────────────────────────────────────────────────────────────────┐
 │  [2] RETRIEVER NODE                                              │
 │                                                                  │
-│  Role    : Retrieve ALL candidates from ChromaDB                 │
-│  Agent   : ChromaDB (no LLM call)                               │
+│  Role    : Retrieve ALL candidates + compute local ranking signals│
+│  Agent   : ChromaDB + cross-encoder (no generative LLM call)    │
 │                                                                  │
 │  PROCESS                                                         │
 │    top_k = pool_size  (full pool — no artificial cap)            │
 │    For each query → collection.query(query_texts, n_results=N)   │
-│    Deduplication: set() across all query results                 │
-│    Rerank: sort by similarity_score descending                   │
-│    No [:20] cap — every candidate is evaluated                   │
+│    Dedup: max cosine similarity per candidate across queries     │
+│    CE scoring: reranker.ce_scores(JD, docs) via                  │
+│      cross-encoder/ms-marco-MiniLM-L-6-v2 (local, free)         │
+│      Uses exact ChromaDB embedded document text                  │
 │                                                                  │
 │  OUTPUT                                                          │
-│    retrieved_ids: List[str]  (all candidate IDs, ranked)        │
+│    retrieved_ids:          List[str]   (all candidate IDs)      │
+│    retrieved_similarities: Dict[str,float]  (max cosine/cid)    │
+│    ce_scores:              Dict[str,float]  (sigmoid CE logit)  │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
@@ -207,17 +217,13 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 ┌──────────────────────────────────────────────────────────────────┐
 │  [4] CRITIQUE NODE                                               │
 │                                                                  │
-│  Role    : QA reviewer — validates all evaluations for           │
-│            consistency, catches score inflation/deflation,       │
-│            applies corrections, decides who gets interviewed     │
-│  Agent   : LLM (single call over all evaluations), temp=0.2     │
-│                                                                  │
-│  POST-PROCESSING                                                 │
-│    Applies score adjustments back into evaluations in-place      │
-│    Marks ev["score_adjusted"] = True on changed scores          │
+│  Role    : QA reviewer — validates evaluations for consistency,  │
+│            flags issues, decides who gets interviewed.           │
+│            READ-ONLY: does NOT mutate scores.                    │
+│  Agent   : LLM (DeepSeek V4 Pro), single call, temp=0.1         │
 │                                                                  │
 │  OUTPUT                                                          │
-│    critique: {is_valid, issues_found[], adjustments[],           │
+│    critique: {is_valid, issues_found[],                          │
 │               recommended_for_interview[], overall_quality,      │
 │               summary}                                           │
 └──────────────────────┬───────────────────────────────────────────┘
@@ -226,12 +232,14 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 ┌──────────────────────────────────────────────────────────────────┐
 │  [5] SYNTHESIZER NODE                                            │
 │                                                                  │
-│  Role    : Produce the final ranked list                         │
+│  Role    : Produce the final ranked list via RRF fusion          │
 │  Agent   : Deterministic (no LLM call)                          │
 │                                                                  │
-│  PROCESS                                                         │
-│    Sort evaluations by match_score descending                    │
-│    Assign rank = 1, 2, 3 ...                                     │
+│  PROCESS — weighted Reciprocal Rank Fusion (rrf_fuse())          │
+│    Three rank lists: match_score, ce_score, vector_similarity    │
+│    fused(c) = Σ w_signal / (60 + rank_signal(c))  × 1000        │
+│    Weights: LLM 0.50 + cross-encoder 0.30 + vector 0.20         │
+│    Tie-break: candidate_id asc (fully deterministic)            │
 │    Set recommended_for_interview = True if ID in critique list  │
 │                                                                  │
 │  match_level labels added in interview_app.py post-processing:  │
@@ -242,7 +250,8 @@ interview simulator with real-time TTS/STT via a FastAPI WebSocket UI.
 │                                                                  │
 │  OUTPUT                                                          │
 │    final_rankings: List[{rank, candidate_id, candidate_name,     │
-│      match_score, match_level, overall_recommendation,           │
+│      match_score, ce_score, vector_similarity, fused_score,      │
+│      match_level, overall_recommendation,                        │
 │      recommended_for_interview, strengths[], weaknesses[],       │
 │      matched_skills[], missing_skills[], reasoning}]             │
 └──────────────────────┬───────────────────────────────────────────┘
@@ -441,6 +450,12 @@ All edges are deterministic (no conditional branching).
 │  GET  /api/jobs              List past screening runs (summary)         │
 │  GET  /api/jobs/{id}         Full screening result (read-only)         │
 │  GET  /api/reports           List completed interview reports           │
+│  GET  /api/report/{id}       Full interview report JSON                 │
+│  GET  /api/report/{id}/pdf   Downloadable PDF — verdict, scores,       │
+│                              category bars, full Q&A transcript         │
+│                                                                         │
+│  POST /api/prepare-interview Lazy IQ generation for pool candidates    │
+│  POST /api/session/{id}/restart  Reset interview state, keep IQs       │
 │                                                                         │
 │  POST /api/screen  multipart/form-data                                  │
 │    Fields: resumes[] (multiple files), jd, skills, max_follow_ups      │
@@ -473,23 +488,127 @@ All edges are deterministic (no conditional branching).
 
 ---
 
+## LLM Model Tiering Strategy
+
+All tasks use DeepSeek V3-0324 (`deepseek/deepseek-chat-v3-0324`) — single model across the entire pipeline.
+Chosen for full rank determinism: 0 swaps across 52 candidates on repeated runs (vs 44 swaps with v3.2).
+V4 Flash and V4 Pro constants are retained in `openrouter_client.py` for optional override but are
+not used in any production code path.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  MODEL — DeepSeek V3-0324  (deepseek/deepseek-chat-v3-0324)                 │
+│                                                                         │
+│  Architecture      671B MoE / 37B active parameters                    │
+│  Context window    64K tokens                                           │
+│  Pricing (in/out)  $0.14 / $0.28 per 1M tokens                        │
+│  Completion tokens ~227–309 per eval call (tight, consistent)          │
+│  Score stability   match_score range 3.8 pts across 10 parallel runs   │
+│  Rank determinism  0 swaps across 52 candidates (2 independent runs)   │
+│  Retries           0 / 10 runs under parallel load                     │
+│  Wall time         13s for 10 parallel evaluations                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Task → Model Assignment
+
+```
+Task                  File                   Model    Rationale
+────────────────────────────────────────────────────────────────────────────────
+Resume extraction     openrouter_client.py   V3       Structured extraction,
+                                                      deterministic schema
+
+Planner               agentic_pipeline.py    V3       JD decomposition, search
+                                                      queries; output cached by
+                                                      JD hash after first run
+
+Evaluator             agentic_pipeline.py    V3       Parallel scoring (6 workers),
+                                                      fixed SCORE_WEIGHTS formula,
+                                                      stable JSON output
+
+Critique              agentic_pipeline.py    V3       QA review, recommend list,
+                                                      read-only (no score mutation)
+
+IQ Generator          agentic_pipeline.py    V3       Tailored interview questions
+                                                      per candidate
+
+Fast-path eval        interview_app.py       V3       Single candidate vs JD on
+                                                      same-JD re-runs
+
+Answer scoring        interview_app.py       V3       Real-time per-answer eval
+                                                      during live interview
+
+Final report          interview_app.py       V3       Full transcript synthesis,
+                                                      verdict + recommendation
+────────────────────────────────────────────────────────────────────────────────
+All 8 tasks use V3 — single model, uniform latency, predictable cost
+```
+
+### Configuration
+
+```python
+# openrouter_client.py — override via .env if needed
+MODEL_V3    = os.getenv("DEEPSEEK_V3_MODEL",    "deepseek/deepseek-chat-v3-0324")   # active
+MODEL_FLASH = os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek/deepseek-v4-flash")  # unused
+MODEL_PRO   = os.getenv("DEEPSEEK_PRO_MODEL",   "deepseek/deepseek-v4-pro")    # unused
+```
+
+```bash
+# .env — optional override
+DEEPSEEK_V3_MODEL=deepseek/deepseek-chat-v3-0324
+```
+
+---
+
+## Stability Test Results — V3 vs V4 Flash
+
+10 parallel evaluations on the same resume (AGENTIC.pdf) and JD, using only the
+evaluator prompt + fixed SCORE_WEIGHTS formula. No planner/critique/IQ.
+
+```
+Metric                     V4 Flash              DeepSeek V3
+──────────────────────────────────────────────────────────────────────
+match_score range          7.1 pts (84.7–91.8)   3.8 pts (90.2–94.0)
+match_score std dev        2.17                  1.49
+skills_score range         7.0 pts               0.0 pts  (95.0 every run)
+experience_score range     15.0 pts              5.0 pts
+education_score range      15.0 pts              15.0 pts
+recommendation split       MATCH 6x / STRONG 3x  STRONG_MATCH 10x / 10x
+                           / WEAK 1x
+prompt tokens (per run)    1717  (consistent)     1453  (264 fewer)
+completion tokens range    427 – 2483  (6x var)   227 – 309  (tight)
+total tokens avg           3090                  1745  (43% fewer)
+wall time (10 runs)        60.3s                 13.0s  (4.6x faster)
+API retries                1                     0
+```
+
+**Why V4 Flash was less stable:** completion token count varied 6x per run
+(427–2483), indicating Flash generated inconsistent amounts of internal
+reasoning/commentary before the JSON answer, directly causing score variance.
+V3 produces compact, deterministic completions (~280 tokens avg).
+
+**Conclusion:** V3 replaced Flash as the default workhorse model across all
+evaluation and extraction tasks.
+
+---
+
 ## LLM Call Distribution
 
 ```
-Node / Step              LLM Calls        Notes
-────────────────────────────────────────────────────────────────────
-Ingestion (parser)       1 per resume     On upload / add_candidate()
-Planner                  1                Once per full pipeline run
-Retriever                0                ChromaDB only (free)
-Evaluator                N (parallel)     1 per candidate, 6 workers
-Critique                 1                Once, over all evaluations
-Synthesizer              0                Deterministic sort (free)
-IQ Generator             ≤5 (parallel)    1 per recommended, 5 workers
-Answer evaluator         1 per answer     During live interview
-Final report             1 per session    After all questions answered
-────────────────────────────────────────────────────────────────────
-Fast path (same JD)      U only           U = uploaded candidates
-                                          Pool rankings from MongoDB
+Node / Step              LLM Calls        Model       Notes
+────────────────────────────────────────────────────────────────────────
+Ingestion (parser)       1 per resume     V3-0324    On upload / add_candidate()
+Planner                  1                V3-0324    Once per JD (cached by hash)
+Retriever                0 (LLM)          —           ChromaDB + CE reranker (local, free)
+Evaluator                N (parallel)     V3-0324    1 per candidate, 6 workers
+Critique                 1                V3-0324    Once, over all evaluations
+Synthesizer              0                —           RRF fusion — deterministic (free)
+IQ Generator             ≤5 (parallel)    V3-0324    1 per recommended, 5 workers
+Answer evaluator         1 per answer     V3-0324    During live interview
+Final report             1 per session    V3-0324    After all questions answered
+────────────────────────────────────────────────────────────────────────────────
+Fast path (same JD)      U only           V3-0324    U = uploaded candidates
+                                                      Pool rankings from MongoDB
 ```
 
 ---
@@ -509,9 +628,9 @@ ScreeningQuery (JD + filters)
         │
         ├──[Evaluator]────► evaluations[]   (parallel, 6 workers)
         │
-        ├──[Critique]─────► critique        (adjusts scores in-place)
+        ├──[Critique]─────► critique        (read-only QA, no score mutation)
         │
-        ├──[Synthesizer]──► final_rankings  (sorted, ranked, labelled)
+        ├──[Synthesizer]──► final_rankings  (RRF-fused, ranked, labelled)
         │
         ├──[IQ Generator]► interview_questions{}  (parallel, top 5)
         │
@@ -552,14 +671,23 @@ interview_agentic/
 │                           save_job(), get_job(), list_jobs()
 │                           save_interview_report(), list_reports()
 │
+├── reranker.py             Cross-encoder reranker (lazy singleton)
+│                           CrossEncoder ms-marco-MiniLM-L-6-v2
+│                           ce_scores(jd, docs) → sigmoid-normalised 0–1 floats
+│                           Called once per pipeline run inside retriever_node
+│
 ├── agentic_pipeline.py     Screening pipeline
-│                           PipelineState (TypedDict)
+│                           PipelineState (TypedDict) — incl. retrieved_similarities,
+│                             ce_scores (new signals from retriever)
+│                           RRF_K=60, FUSION_WEIGHTS={llm:0.50,ce:0.30,vec:0.20}
+│                           rrf_fuse() — pure rank-fusion function, reused by fast path
 │                           CandidateVectorStore (ChromaDB)
 │                             get_candidate_data() — resume_json from metadata
 │                           AgentNodes (all 6 LangGraph nodes)
+│                             retriever_node — full pool + CE scoring + sim tracking
 │                             evaluator_node  — ThreadPoolExecutor(6)
+│                             synthesizer_node — RRF fusion, not plain match_score sort
 │                             interview_questions_node — ThreadPoolExecutor(5)
-│                             retriever_node — full pool (top_k=pool_size)
 │                           build_screening_graph() → compiled graph
 │                           ScreeningPipeline (facade class)
 │
@@ -665,10 +793,11 @@ Same JD re-run + 1 upload (fast path)             ~$0.001
 Layer               Technology              Purpose
 ─────────────────────────────────────────────────────────────────
 File parsing        PyPDF2, python-docx     Extract raw text
-LLM                 DeepSeek v4 Flash       Structured extraction,
-                    via OpenRouter          evaluation, critique,
-                                            IQ generation, answer
-                                            scoring, final reports
+LLM                 DeepSeek V3 (default)   Extraction, evaluation,
+                    DeepSeek V4 Pro         answer scoring (V3)
+                    via OpenRouter          Planner, critique, IQ
+                                            generation, final report
+                                            (V4 Pro)
 Embeddings          all-MiniLM-L6-v2        384-dim sentence embeddings
                     (ChromaDB default)      via ONNX runtime (local)
 Vector DB           ChromaDB 1.5.x          Persistent cosine search

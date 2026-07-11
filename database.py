@@ -295,6 +295,27 @@ def save_job(job_doc: dict) -> str:
     return str(result.inserted_id)
 
 
+def get_plan_for_hash(jd_hash: str) -> Optional[dict]:
+    """Return cached planner output for a JD hash, or None."""
+    try:
+        doc = get_db().jd_plans.find_one({"_id": jd_hash})
+        return doc.get("plan") if doc else None
+    except Exception:
+        return None
+
+
+def save_plan_for_hash(jd_hash: str, plan: dict) -> None:
+    """Cache planner output keyed by JD hash."""
+    try:
+        get_db().jd_plans.update_one(
+            {"_id": jd_hash},
+            {"$set": {"plan": plan, "saved_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
 def list_jobs(limit: int = 50) -> list:
     db = get_db()
     return list(
@@ -352,3 +373,82 @@ def list_reports(limit: int = 50) -> list:
              "job_description": 1, "completed_at": 1}
         ).sort("completed_at", DESCENDING).limit(limit)
     )
+
+
+def get_report_by_session(session_id: str) -> Optional[dict]:
+    """Return the full interview report document for a given session ID."""
+    try:
+        return get_db().interview_reports.find_one({"_id": session_id})
+    except Exception:
+        return None
+
+
+# ── Session Persistence ───────────────────────────────────────────────────────
+
+def _strip_session(session: dict) -> dict:
+    """Remove non-serialisable runtime keys before saving to MongoDB."""
+    return {k: v for k, v in session.items() if k not in ("ws", "stt", "local_stt")}
+
+
+def save_session(session_id: str, session: dict) -> None:
+    """Upsert a full session document (initial save on creation)."""
+    try:
+        doc = _strip_session(session)
+        doc.setdefault("status", "active")
+        get_db().sessions.update_one(
+            {"_id": session_id},
+            {"$set": {**doc, "_id": session_id, "updated_at": datetime.now(timezone.utc)},
+             "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+def update_session_transcript(
+    session_id: str,
+    current_idx: int,
+    follow_up_count: int,
+    transcript: list,
+    answer_scores: list,
+) -> None:
+    """Partial update after each answered question — keeps transcript in sync."""
+    try:
+        get_db().sessions.update_one(
+            {"_id": session_id},
+            {"$set": {
+                "current_idx":     current_idx,
+                "follow_up_count": follow_up_count,
+                "transcript":      transcript,
+                "answer_scores":   answer_scores,
+                "updated_at":      datetime.now(timezone.utc),
+            }},
+        )
+    except Exception:
+        pass
+
+
+def mark_session_completed(session_id: str) -> None:
+    """Mark a session as completed once the final report is generated."""
+    try:
+        get_db().sessions.update_one(
+            {"_id": session_id},
+            {"$set": {"status": "completed", "updated_at": datetime.now(timezone.utc)}},
+        )
+    except Exception:
+        pass
+
+
+def load_session(session_id: str) -> Optional[dict]:
+    """Restore a session from MongoDB (used after server restart)."""
+    try:
+        doc = get_db().sessions.find_one({"_id": session_id})
+        if doc:
+            doc.pop("_id", None)
+            doc.pop("created_at", None)
+            doc.pop("updated_at", None)
+            doc.pop("status", None)
+            return doc
+    except Exception:
+        pass
+    return None

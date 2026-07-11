@@ -36,12 +36,8 @@ class InterviewState(TypedDict):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _parse_json(text: str) -> dict:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("```")[1]
-        if s.startswith("json"):
-            s = s[4:]
-    return json.loads(s.strip())
+    from openrouter_client import _extract_json
+    return _extract_json(text)
 
 
 def _flatten_questions(interview_questions: Dict[str, Any]) -> List[Dict]:
@@ -155,7 +151,7 @@ Score guide: 1-3=poor, 4-6=adequate, 7-8=good, 9-10=excellent.
 needs_follow_up=true only if the answer was shallow or missed a critical signal."""
 
         try:
-            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.2)
+            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.1)
             evaluation = _parse_json(resp)
         except Exception as e:
             evaluation = {
@@ -281,7 +277,7 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=1024)
+            resp = self.llm.call_llm([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=1024)
             report = _parse_json(resp)
         except Exception as e:
             report = {"error": str(e), "overall_score": avg_score, "verdict": "ERROR"}

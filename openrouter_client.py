@@ -1,3 +1,4 @@
+import re
 import requests
 import json
 import os
@@ -5,11 +6,65 @@ from typing import Optional, Dict, List, Any
 from schemas import Resume
 
 
+# Tiered model constants — override via env vars if needed
+MODEL_V3    = os.getenv("DEEPSEEK_V3_MODEL",    "deepseek/deepseek-chat-v3-0324")  # default workhorse
+MODEL_FLASH = os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek/deepseek-v4-flash")   # kept for reference
+MODEL_PRO   = os.getenv("DEEPSEEK_PRO_MODEL",   "deepseek/deepseek-v4-pro")
+
+
+def _extract_json(text: str) -> dict:
+    """
+    Robustly extract a JSON object from an LLM response.
+    Tries four strategies in order:
+      1. Direct parse (clean response)
+      2. Strip markdown fences
+      3. Slice from first { to last }
+      4. Regex scan for the largest {...} block
+    """
+    text = (text or "").strip()
+
+    # 1. Direct
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Markdown fence
+    if "```" in text:
+        for part in text.split("```")[1::2]:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            try:
+                return json.loads(part)
+            except json.JSONDecodeError:
+                continue
+
+    # 3. First { … last }
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # 4. Regex — largest {...} block (handles trailing commentary)
+    candidates = re.findall(r"\{[\s\S]*?\}", text)
+    candidates.sort(key=len, reverse=True)
+    for blob in candidates:
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(f"Could not extract valid JSON from model response. First 300 chars: {text[:300]}")
+
+
 class OpenRouterClient:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         self.base_url = "https://openrouter.ai/api/v1"
-        self.model = "deepseek/deepseek-chat"  # DeepSeek v4 Flash equivalent
+        self.model = MODEL_V3  # default: DeepSeek V3
 
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY environment variable not set")
@@ -46,7 +101,19 @@ class OpenRouterClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            if "error" in result:
+                raise Exception(f"OpenRouter error: {result['error']}")
+            msg = result["choices"][0]["message"]
+            # Reasoning models (V4 Pro) sometimes put the final answer in
+            # 'reasoning' when content is null — fall back to it.
+            content = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content")
+            if not content:
+                used_model = model or self.model
+                raise Exception(
+                    f"Model '{used_model}' returned empty content. "
+                    f"Full response: {result}"
+                )
+            return content
         except Exception as e:
             raise Exception(f"OpenRouter API error: {str(e)}")
 
@@ -137,19 +204,11 @@ Return ONLY valid JSON, no markdown or extra text.
         ]
 
         try:
-            response = self.call_llm(messages, temperature=0.3)
-            # Clean up response
-            json_str = response.strip()
-            if json_str.startswith("```"):
-                json_str = json_str.split("```")[1]
-                if json_str.startswith("json"):
-                    json_str = json_str[4:]
-            json_str = json_str.strip()
-
-            data = json.loads(json_str)
+            response = self.call_llm(messages, model=MODEL_V3, temperature=0.1)
+            data = _extract_json(response)
             return self._dict_to_resume(data)
-        except json.JSONDecodeError as e:
-            raise Exception(f"Failed to parse LLM response as JSON: {str(e)}")
+        except (ValueError, KeyError) as e:
+            raise Exception(f"Failed to parse resume extraction response: {str(e)}")
 
     def _dict_to_resume(self, data: dict) -> Resume:
         """Convert raw dict from LLM into nested Resume dataclass"""
@@ -238,12 +297,5 @@ Return ONLY valid JSON.
             {"role": "user", "content": evaluation_prompt}
         ]
 
-        response = self.call_llm(messages, temperature=0.3)
-        json_str = response.strip()
-        if json_str.startswith("```"):
-            json_str = json_str.split("```")[1]
-            if json_str.startswith("json"):
-                json_str = json_str[4:]
-        json_str = json_str.strip()
-
-        return json.loads(json_str)
+        response = self.call_llm(messages, model=MODEL_FLASH, temperature=0.1)
+        return _extract_json(response)
