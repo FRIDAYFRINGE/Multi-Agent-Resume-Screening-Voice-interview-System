@@ -1,0 +1,89 @@
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env*.local
+!.env.example
+
+# ─── Virtualenvs ──────────────────────────────────────────────────────────────
+.venv
+venv/
+ENV/
+env/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ─── IDEs / OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# ─── Personal data — never publish ────────────────────────────────────────────
+# Real candidate CVs. The filenames alone carry people's full names, and the
+# documents contain emails, phone numbers and work history.
+test_cvs/
+*_resume.pdf
+*_resume.docx
+
+# Ground truth for the withdrawn real-CV slice: its candidate ids are derived
+# from real people's email addresses. eval/qrels.json (45 synthetic seeds) is
+# published instead — see the negation below.
+eval/qrels_v2.json
+
+# ─── Databases / generated stores ─────────────────────────────────────────────
+chroma_db/
+chroma_data/
+*.sqlite3
+
+# ─── Data files: ignore by default, publish by exception ──────────────────────
+# Blanket-ignoring these keeps stray resumes, dumps and run outputs out of the
+# repo. Anything the project genuinely needs is re-included explicitly below —
+# without those negations `requirements.txt` silently never ships, which is how
+# the published repo ended up impossible to install.
+*.json
+*.txt
+*.pdf
+*.docx
+*.csv
+
+!requirements.txt
+!example_resume.txt
+!eval/qrels.json
+
+# ─── Run artifacts ────────────────────────────────────────────────────────────
+*.log
+logs/
+eval/results/
+eval/_jd_current.txt
+
+# ─── Kept local, not published ────────────────────────────────────────────────
+# These are real work and stay in the working tree — they are simply outside the
+# scope of the published repo, which ships the runnable application and nothing
+# else. Delete a line here to start publishing that file again.
+eval/
+ARCHITECTURE.md
+OPTIMIZATION_LOOP.md
+TODO.md
+rank.md
+
+# Alternate entrypoints and demos superseded by interview_app.py
+main.py
+example_usage.py
+run_interview.py
+
+# Test / benchmark scripts
+run_score_test.py
+test_pipeline_stability.py
+test_pipeline_v3.py
+
+# Local clone of the published repo, used for diffing
+updated/
