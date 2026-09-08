@@ -90,14 +90,16 @@ MongoDB is optional — the app works without it (ChromaDB only), but persistenc
 
 ## STT Provider
 
-Switch between local and cloud transcription with one line in `interview_app.py`:
+Switch between cloud streaming, cloud Whisper, and local transcription via `.env` or `interview_app.py`:
 
 ```python
-STT_PROVIDER = "local"   # faster-whisper large-v3, runs on CPU, free, slow
-STT_PROVIDER = "groq"    # Groq Whisper large-v3 API, free tier, ~20x faster
+STT_PROVIDER = "assemblyai" # AssemblyAI v3 streaming WebSocket (universal-3-5-pro) [default]
+STT_PROVIDER = "groq"       # Groq Whisper large-v3 API, free tier, fast cloud
+STT_PROVIDER = "local"      # faster-whisper large-v3, runs on CPU, free, slow
 ```
 
-For Groq: get a free key at https://console.groq.com/keys and add `GROQ_API_KEY=...` to `.env`.
+For AssemblyAI: add `ASSEMBLY_AI_API_KEY=...` to `.env` (https://www.assemblyai.com/dashboard/home).
+For Groq: add `GROQ_API_KEY=...` to `.env` (https://console.groq.com/keys).
 
 ---
 
@@ -221,7 +223,7 @@ interview_agentic/
 │
 ├── interview_simulator.py  7-node LangGraph interview state machine
 │
-├── voice_io.py             TTS (edge-tts) + STT (faster-whisper / Groq)
+├── voice_io.py             TTS (edge-tts) + STT (AssemblyAI / Groq / faster-whisper)
 │
 ├── openrouter_client.py    OpenRouter API wrapper — DeepSeek V3 default
 │                           MODEL_V3 / MODEL_FLASH / MODEL_PRO constants
@@ -300,8 +302,10 @@ silently splits one person into two candidates.
 # Required
 OPENROUTER_API_KEY=sk-or-...       # openrouter.ai
 
-# Optional — for fast cloud STT
-GROQ_API_KEY=gsk_...               # console.groq.com/keys
+# Speech-to-text (STT)
+ASSEMBLY_AI_API_KEY=...             # assemblyai.com/dashboard/home (universal-3-5-pro streaming)
+STT_PROVIDER=assemblyai             # assemblyai | groq | local
+GROQ_API_KEY=gsk_...               # console.groq.com/keys (fallback)
 
 # Optional — for MongoDB persistence
 MONGO_URI=mongodb://localhost:27017
@@ -344,8 +348,9 @@ Ingestion is ~97% of cost and is one-time per resume. ChromaDB embeddings are fu
 | Parallelism | ThreadPoolExecutor (6 eval workers, 5 IQ workers) |
 | Data models | Python dataclasses (Python 3.14 compatible) |
 | TTS | edge-tts (Microsoft Edge neural voices, free) |
+| STT streaming | AssemblyAI v3 WebSocket (`universal-3-5-pro`, real-time partial/final turns) |
+| STT cloud | Groq Whisper large-v3 API (free tier, fast cloud) |
 | STT local | faster-whisper large-v3 (CPU/GPU) |
-| STT cloud | Groq Whisper large-v3 API (free tier, ~20× faster) |
 | Web API | FastAPI 0.115 + WebSockets |
 | Frontend | Vanilla HTML/CSS/JS (dark theme, no framework) |
 | Eval metrics | numpy, scipy (NDCG, jackknife CI, permutation test) |

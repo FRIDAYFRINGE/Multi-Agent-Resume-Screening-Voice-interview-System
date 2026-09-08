@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 
 import numpy as np
-import scipy.io.wavfile as wavfile
 import soundfile as sf
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -36,9 +35,10 @@ from database import (save_candidate, save_job, save_interview_report,
                       get_report_by_session)
 
 # ── STT provider ───────────────────────────────────────────────────────────────
-# "local" → faster-whisper large-v3  (free, no API key, slow on CPU)
-# "groq"  → Groq cloud Whisper large-v3  (free tier, fast, needs GROQ_API_KEY in .env)
-STT_PROVIDER = "groq"
+# "assemblyai" → AssemblyAI cloud streaming API (universal-3-5-pro, needs ASSEMBLY_AI_API_KEY)
+# "groq"       → Groq cloud Whisper large-v3  (free tier, fast, needs GROQ_API_KEY in .env)
+# "local"      → faster-whisper large-v3  (free, no API key, slow on CPU)
+STT_PROVIDER = os.getenv("STT_PROVIDER", "assemblyai").lower().strip()
 
 
 # ── Model warm-up ──────────────────────────────────────────────────────────────
@@ -207,7 +207,10 @@ def _match_level(match_score: float, overall_recommendation: str) -> str:
 
 
 def _generate_iq(llm, jd: str, ranking: dict, resume_dict: dict) -> dict:
-    """Generate interview questions for one candidate (blocking LLM call)."""
+    """Generate interview questions for one candidate (blocking LLM call).
+
+    Retries up to 3 times on JSON-parse failures.
+    """
     from interview_simulator import _parse_json
     prompt = f"""You are a senior technical interviewer. Generate a tailored interview question set for this candidate.
 
@@ -224,7 +227,7 @@ Screening evaluation:
 - Missing skills: {json.dumps(ranking.get('missing_skills', []))}
 - Matched skills: {json.dumps(ranking.get('matched_skills', []))}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON (no commentary, no thinking, no markdown):
 {{
   "candidate_name": "<name>",
   "technical_depth": [
@@ -243,8 +246,19 @@ Return ONLY valid JSON:
     {{"question": "<q>", "what_to_look_for": "<signal>"}}
   ]
 }}"""
-    resp = llm.call_llm([{"role": "user", "content": prompt}], model=MODEL_V3, temperature=0.1)
-    return _parse_json(resp)
+
+    MAX_RETRIES = 3
+    last_exc = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = llm.call_llm([{"role": "user", "content": prompt}], model=MODEL_V3, temperature=0.1)
+            return _parse_json(resp)
+        except Exception as exc:
+            last_exc = exc
+            cname = (resume_dict.get("contact_info") or {}).get("name", "?")
+            print(f"[iq] attempt {attempt}/{MAX_RETRIES} failed for {cname}: {exc}", flush=True)
+
+    raise last_exc  # bubble up after all retries exhausted
 
 
 def _extract_email_from_text(raw_text: str) -> str:
@@ -255,7 +269,11 @@ def _extract_email_from_text(raw_text: str) -> str:
 
 
 def _evaluate_candidate(llm, jd: str, cid: str, resume_dict: dict) -> dict:
-    """Score one candidate against a JD (used in the fast-path re-run)."""
+    """Score one candidate against a JD (used in the fast-path re-run).
+
+    Retries up to 3 times on JSON-parse failures — the LLM occasionally emits a
+    thinking preamble that trips the parser, but a retry almost always succeeds.
+    """
     from interview_simulator import _parse_json
     name = (resume_dict.get("contact_info") or {}).get("name") or cid
     prompt = f"""You are an expert recruiter. Evaluate this candidate against the job description.
@@ -266,7 +284,7 @@ Job Description:
 Candidate Resume (JSON):
 {json.dumps(resume_dict, indent=2)}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON (no commentary, no thinking, no markdown):
 {{
   "match_score": <float 0-100>,
   "skills_score": <float 0-100>,
@@ -280,11 +298,23 @@ Return ONLY valid JSON:
   "overall_recommendation": "<STRONG_MATCH|MATCH|WEAK_MATCH|NOT_QUALIFIED>",
   "reasoning": "<1-2 sentence summary>"
 }}"""
-    try:
-        resp = llm.call_llm([{"role": "user", "content": prompt}], model=MODEL_V3, temperature=0.1)
-        ev = _parse_json(resp)
-    except Exception as exc:
-        ev = {"match_score": 0, "overall_recommendation": "ERROR", "reasoning": str(exc)}
+
+    MAX_RETRIES = 3
+    last_exc = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = llm.call_llm([{"role": "user", "content": prompt}], model=MODEL_V3, temperature=0.1)
+            ev = _parse_json(resp)
+            ev["candidate_id"] = cid
+            ev["candidate_name"] = name
+            return ev
+        except Exception as exc:
+            last_exc = exc
+            print(f"[eval] attempt {attempt}/{MAX_RETRIES} failed for {cid}: {exc}", flush=True)
+
+    # All retries exhausted — return fallback
+    print(f"[eval] WARNING: all {MAX_RETRIES} attempts failed for {cid}, returning score 0", flush=True)
+    ev = {"match_score": 0, "overall_recommendation": "ERROR", "reasoning": str(last_exc)}
     ev["candidate_id"] = cid
     ev["candidate_name"] = name
     return ev
@@ -674,13 +704,12 @@ def _run_screening_job(
                 )
                 r["newly_uploaded"] = r.get("candidate_id") in _submitted
 
-            # Create sessions upfront only for uploaded Strong/Good Fit (parallel IQ).
+            # Create sessions upfront for ALL newly uploaded candidates (parallel IQ).
             # Pool candidates get lazy IQ via POST /api/prepare-interview on click.
             sessions_out: dict = {}
             needs_iq = [
                 r for r in merged
                 if r.get("newly_uploaded")
-                and r.get("match_level") in ("Strong Fit", "Good Fit")
             ]
 
             def _make_fast_session(ranking: dict):
@@ -799,13 +828,12 @@ def _run_screening_job(
                 save_session(sid, sessions[sid])
             sessions_out[cid] = {"session_id": sid, "total_questions": len(question_queue)}
 
-        # For uploaded candidates that are Strong/Good Fit but didn't make the
-        # top-5 recommended cut, generate interview questions and create sessions.
+        # For ALL uploaded candidates that didn't make the top-5 recommended cut,
+        # generate interview questions and create sessions.
         needs_iq = [
             r for r in state["final_rankings"]
             if r.get("candidate_id") in submitted_cids
             and r.get("candidate_id") not in sessions_out
-            and r.get("match_level") in ("Strong Fit", "Good Fit")
         ]
 
         if needs_iq:
@@ -914,19 +942,77 @@ async def submit_answer(
             )
             return " ".join(s.text.strip() for s in segs).strip()
 
-        if STT_PROVIDER == "groq":
+        def _groq_transcribe(path: str) -> str:
             from voice_io import GroqSTT
-            stt = sess.get("stt")
+            stt = sess.get("groq_stt")
+            if not stt:
+                stt = GroqSTT()
+                sess["groq_stt"] = stt
+            return stt.transcribe_file(path, prompt=TECH_PROMPT)
+
+        loop = asyncio.get_running_loop()
+        def _on_assembly_turn(turn_text: str, is_final: bool):
+            if ws_conn:
+                asyncio.run_coroutine_threadsafe(
+                    ws_conn.send_json({
+                        "type": "transcription_stream",
+                        "text": turn_text,
+                        "is_final": is_final
+                    }),
+                    loop
+                )
+
+        text = ""
+        if STT_PROVIDER == "assemblyai":
+            from voice_io import AssemblyAISTT
+            stt = sess.get("assembly_stt")
             if not stt:
                 try:
-                    stt = GroqSTT()
-                    sess["stt"] = stt
+                    stt = AssemblyAISTT()
+                    sess["assembly_stt"] = stt
                 except ValueError:
-                    stt = None  # no API key — fall through to local
+                    stt = None
             try:
                 if stt is None:
-                    raise RuntimeError("no key")
-                text = stt.transcribe_file(audio_path, prompt=TECH_PROMPT)
+                    raise RuntimeError("ASSEMBLY_AI_API_KEY not set")
+                text = await asyncio.to_thread(
+                    stt.transcribe_file,
+                    audio_path,
+                    TECH_PROMPT,
+                    _on_assembly_turn
+                )
+            except Exception as aai_err:
+                err_str = str(aai_err)
+                if "401" in err_str or "unauthorized" in err_str.lower() or "not set" in err_str.lower():
+                    reason = "AssemblyAI API key invalid or not set"
+                elif "403" in err_str or "limit" in err_str.lower():
+                    reason = "AssemblyAI rate limit or access error"
+                else:
+                    reason = f"AssemblyAI error ({err_str[:60]})"
+
+                if ws_conn:
+                    await ws_conn.send_json({
+                        "type": "status",
+                        "text": f"{reason} — trying Groq fallback",
+                        "color": "yellow",
+                    })
+                try:
+                    text = await asyncio.to_thread(_groq_transcribe, audio_path)
+                except Exception as groq_err:
+                    if ws_conn:
+                        await ws_conn.send_json({
+                            "type": "status",
+                            "text": f"Groq fallback failed ({str(groq_err)[:40]}) — using local Whisper",
+                            "color": "yellow",
+                        })
+                    text = await asyncio.to_thread(_local_transcribe, audio_path)
+            finally:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+
+        elif STT_PROVIDER == "groq":
+            try:
+                text = await asyncio.to_thread(_groq_transcribe, audio_path)
             except Exception as groq_err:
                 err_str = str(groq_err)
                 if "403" in err_str:
@@ -941,12 +1027,16 @@ async def submit_answer(
                         "text": f"{reason} — switching to local Whisper",
                         "color": "yellow",
                     })
-                text = _local_transcribe(audio_path)
+                text = await asyncio.to_thread(_local_transcribe, audio_path)
             finally:
-                os.unlink(audio_path)
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
         else:
-            text = _local_transcribe(audio_path)
-            os.unlink(audio_path)
+            try:
+                text = await asyncio.to_thread(_local_transcribe, audio_path)
+            finally:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
 
         # Push raw transcription — evaluator LLM handles STT noise during scoring
         if ws_conn:

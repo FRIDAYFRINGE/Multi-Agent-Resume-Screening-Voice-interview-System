@@ -713,7 +713,7 @@ function showRankings(data) {
       actionCell = `<button class="btn btn-primary btn-sm" style="${btnStyle}"
            onclick="startInterview('${sess.session_id}','${esc(r.candidate_name)}',${r.match_score||0},${sess.total_questions})">
            ${btnLabel}</button>`;
-    } else if (jobId && (level === 'Strong Fit' || level === 'Good Fit')) {
+    } else if (jobId) {
       actionCell = `<button class="btn btn-primary btn-sm"
            onclick="prepareAndInterview('${r.candidate_id}','${jobId}',${r.match_score||0},'${esc(r.candidate_name)}',this)">
            Interview</button>`;
@@ -827,12 +827,13 @@ function connectWS() {
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'question')     handleQuestion(msg);
-    if (msg.type === 'tts_audio')    playTTS(msg.audio_b64);
-    if (msg.type === 'transcription')handleTranscription(msg.text);
-    if (msg.type === 'evaluation')   handleEvaluation(msg);
-    if (msg.type === 'report')       handleReport(msg);
-    if (msg.type === 'status')       setStatus(msg.text, msg.color || '');
+    if (msg.type === 'question')             handleQuestion(msg);
+    if (msg.type === 'tts_audio')            playTTS(msg.audio_b64);
+    if (msg.type === 'transcription_stream') handleTranscriptionStream(msg.text);
+    if (msg.type === 'transcription')        handleTranscription(msg.text);
+    if (msg.type === 'evaluation')           handleEvaluation(msg);
+    if (msg.type === 'report')               handleReport(msg);
+    if (msg.type === 'status')               setStatus(msg.text, msg.color || '');
   };
 
   ws.onopen = () => {
@@ -1009,6 +1010,18 @@ async function submitAnswer() {
     clearInterval(pulse);
     setStatus('Error: ' + e.message, 'red');
   }
+}
+
+function handleTranscriptionStream(text) {
+  if (!text) return;
+  const pBar = document.getElementById('stt-progress-bar');
+  if (pBar) pBar.style.width = '95%';
+  const ans = document.getElementById('answer-text');
+  if (ans) {
+    ans.style.display = '';
+    ans.textContent = text + ' ...';
+  }
+  setStatus('Streaming transcription (AssemblyAI)...', 'yellow');
 }
 
 function handleTranscription(text) {

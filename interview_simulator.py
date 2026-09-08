@@ -13,6 +13,7 @@ Command(resume=text).  That is what lets one graph serve both the CLI (mic +
 local Whisper) and the web app (browser audio + Groq/Whisper) without either
 side re-implementing the follow-up logic.
 """
+import os
 import json
 import operator
 import uuid
@@ -395,13 +396,27 @@ class InterviewSimulator:
         openrouter_api_key: Optional[str] = None,
         whisper_model: str = "base",
         tts_rate: int = 165,
-        max_follow_ups: int = 1
+        max_follow_ups: int = 1,
+        stt_provider: Optional[str] = None,
     ):
         from openrouter_client import OpenRouterClient
         from voice_io import TextToSpeech, SpeechToText
         self.llm = OpenRouterClient(openrouter_api_key)
         self.tts = TextToSpeech(rate=tts_rate)
-        self.stt = SpeechToText(model_size=whisper_model)
+
+        provider = (stt_provider or os.getenv("STT_PROVIDER", "assemblyai")).lower().strip()
+        has_assembly_key = bool(os.getenv("ASSEMBLY_AI_API_KEY") or os.getenv("ASSEMBLYAI_API_KEY"))
+
+        if provider == "assemblyai" and has_assembly_key:
+            try:
+                from voice_io import AssemblyAISTT
+                self.stt = AssemblyAISTT()
+            except Exception as e:
+                print(f"[InterviewSimulator] Failed initializing AssemblyAISTT ({e}), falling back to local Whisper.")
+                self.stt = SpeechToText(model_size=whisper_model)
+        else:
+            self.stt = SpeechToText(model_size=whisper_model)
+
         self.max_follow_ups = max_follow_ups
         self._graph = build_interview_graph(self.llm)
 
