@@ -39,6 +39,8 @@ def _build():
     Try offline first, then fall back to a networked load so a fresh machine
     with an empty cache can still download the model on first run.
     """
+    import sys
+    sys.modules.setdefault("kernels", None)
     from sentence_transformers import CrossEncoder
     prev = os.environ.get("HF_HUB_OFFLINE")
     _set_offline(True)
@@ -89,5 +91,9 @@ def ce_scores(jd_text: str, docs: list) -> list:
     import numpy as np
     if not docs:
         return []
-    logits = _get_model().predict([(jd_text, d or "") for d in docs])
+    logits = _get_model().predict(
+        [(jd_text, d or "") for d in docs],
+        batch_size=32,
+        show_progress_bar=False,
+    )
     return [float(s) for s in (1.0 / (1.0 + np.exp(-np.asarray(logits, dtype=np.float64))))]
