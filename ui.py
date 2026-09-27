@@ -248,15 +248,16 @@ HTML = """
 
     <div class="card">
       <h2>Job Description</h2>
-      <textarea id="jd-input" placeholder="Paste the full job description here...">Senior AI/ML Engineer - Agentic Systems
-Design and build multi-agent LLM systems (LangGraph, CrewAI).
-Implement RAG pipelines with vector databases (ChromaDB, FAISS).
-Build production FastAPI backends. Work with LoRA/QLoRA fine-tuning
-and RLHF. Deploy with Docker and CI/CD. Strong Python and PyTorch.
-Required: 1+ year production AI experience.</textarea>
+      <textarea id="jd-input" placeholder="Paste the full job description here...">Senior Business Analyst - Agile & Enterprise Systems
+Lead requirements elicitation, analysis, and documentation (BRD, FRD, SRS, Use Cases, User Stories, Acceptance Criteria).
+Facilitate Agile/Scrum ceremonies (Sprint Planning, Backlog Grooming, JAD sessions) and manage product backlogs.
+Model business processes and workflows using BPMN, UML, MS Visio, or Lucidchart.
+Coordinate User Acceptance Testing (UAT), define test cases, and manage defect lifecycle in JIRA or HP ALM.
+Perform data analysis, business rule validation, and SQL queries to support data-driven decision making.
+Strong stakeholder communication, cross-functional leadership, and domain expertise.</textarea>
 
       <label>Required Skills (comma-separated)</label>
-      <input type="text" id="skills-input" value="LangGraph, ChromaDB, FastAPI, RAG, PyTorch">
+      <input type="text" id="skills-input" value="BRD, FRD, Agile, Scrum, JIRA, UML, MS Visio, SQL, User Stories, UAT">
 
       <label>Max follow-ups per question</label>
       <select id="followups-select" style="background:#0f1117;border:1px solid #2a2d3e;border-radius:8px;padding:10px 14px;width:100%;color:#e0e0e0;">
@@ -713,7 +714,7 @@ function showRankings(data) {
       actionCell = `<button class="btn btn-primary btn-sm" style="${btnStyle}"
            onclick="startInterview('${sess.session_id}','${esc(r.candidate_name)}',${r.match_score||0},${sess.total_questions})">
            ${btnLabel}</button>`;
-    } else if (jobId) {
+    } else if (jobId && (level === 'Strong Fit' || level === 'Good Fit')) {
       actionCell = `<button class="btn btn-primary btn-sm"
            onclick="prepareAndInterview('${r.candidate_id}','${jobId}',${r.match_score||0},'${esc(r.candidate_name)}',this)">
            Interview</button>`;
@@ -827,13 +828,12 @@ function connectWS() {
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'question')             handleQuestion(msg);
-    if (msg.type === 'tts_audio')            playTTS(msg.audio_b64);
-    if (msg.type === 'transcription_stream') handleTranscriptionStream(msg.text);
-    if (msg.type === 'transcription')        handleTranscription(msg.text);
-    if (msg.type === 'evaluation')           handleEvaluation(msg);
-    if (msg.type === 'report')               handleReport(msg);
-    if (msg.type === 'status')               setStatus(msg.text, msg.color || '');
+    if (msg.type === 'question')     handleQuestion(msg);
+    if (msg.type === 'tts_audio')    playTTS(msg.audio_b64);
+    if (msg.type === 'transcription')handleTranscription(msg.text);
+    if (msg.type === 'evaluation')   handleEvaluation(msg);
+    if (msg.type === 'report')       handleReport(msg);
+    if (msg.type === 'status')       setStatus(msg.text, msg.color || '');
   };
 
   ws.onopen = () => {
@@ -1010,18 +1010,6 @@ async function submitAnswer() {
     clearInterval(pulse);
     setStatus('Error: ' + e.message, 'red');
   }
-}
-
-function handleTranscriptionStream(text) {
-  if (!text) return;
-  const pBar = document.getElementById('stt-progress-bar');
-  if (pBar) pBar.style.width = '95%';
-  const ans = document.getElementById('answer-text');
-  if (ans) {
-    ans.style.display = '';
-    ans.textContent = text + ' ...';
-  }
-  setStatus('Streaming transcription (AssemblyAI)...', 'yellow');
 }
 
 function handleTranscription(text) {
