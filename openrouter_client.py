@@ -6,11 +6,13 @@ import threading
 from typing import Optional, Dict, List, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from dotenv import load_dotenv
+load_dotenv()
 from schemas import Resume
 
 
 # Tiered model constants — override via env vars if needed
-MODEL_V3    = os.getenv("DEEPSEEK_V3_MODEL",    "deepseek/deepseek-chat-v3-0324")  # default workhorse
+MODEL_V3    = os.getenv("DEEPSEEK_V3_MODEL") or os.getenv("SCREENING_MODEL") or "deepseek/deepseek-chat-v3-0324"  # default workhorse
 MODEL_FLASH = os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek/deepseek-v4-flash")   # kept for reference
 MODEL_PRO   = os.getenv("DEEPSEEK_PRO_MODEL",   "deepseek/deepseek-v4-pro")
 
@@ -123,7 +125,7 @@ class OpenRouterClient:
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=60
+                timeout=(15, 180)
             )
             response.raise_for_status()
             result = response.json()
