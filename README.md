@@ -29,7 +29,7 @@ priced:
 | Funnel (retrieval / cross-encoder / LLM) | Kendall's τ | Total run |
 |---|---:|---:|
 | 30 / 30 / 10 | 0.495 | **8.6s** |
-| 82 / 82 / 82 *(whole pool)* | **0.680** | 143.7s |
+| 82 / 82 / 82 *(whole pool)* | **0.680** | 54.7s |
 
 All three limits are environment variables, so the operating point is a deployment
 choice rather than a code change. The default favours interactive latency (8.6s node wall-clock); raising
