@@ -7,8 +7,9 @@ Seeds a candidate pool → narrows it against a job description through a 6-node
 
 ## Evaluated Performance
 
-Ranking quality is measured with standard IR methodology — TREC-style qrels, jackknife
-95% confidence intervals, and a one-sided paired permutation test (n = 10,000, p < 0.001) — against an **82-candidate labeled pool** (37 real uploaded CVs + 45 seeded profiles) across four relevance tiers for a Senior Business Analyst role.
+
+Ranking quality is measured using standard IR methodology - TREC-style graded qrels, **candidate-level leave-one-out jackknife 95% intervals**, and a one-sided paired permutation test (10,000 permutations, `p < 0.001`) — on an **82-candidate labeled pool** (37 real uploaded CVs + 45 seeded profiles) for a **single Senior Business Analyst job description**, across four relevance tiers. The jackknife intervals quantify sensitivity within this benchmark and are not intended as estimates of performance across unseen job descriptions.
+
 
 | Metric | Pipeline (3-Way RRF) | LLM-Only | Vector-Only (ChromaDB) | Random Baseline |
 |---|---|---|---|---|
@@ -22,8 +23,7 @@ Ranking quality is measured with standard IR methodology — TREC-style qrels, j
 | Spearman's ρ (Funnel 30/30/10) | **0.617** [0.520, 0.714] | 0.447 [0.345, 0.549] | 0.371 [0.270, 0.472] | −0.072 [−0.287, 0.143] |
 | Spearman's ρ (Full 82-Pool) | **0.807** [0.728, 0.886] | 0.822 [0.753, 0.891] | 0.793 [0.712, 0.874] | −0.072 [−0.287, 0.143] |
 
-Both the pipeline and deterministic baselines retrieve the right candidates into the
-top tier (NDCG@5 = 0.967, MRR = 1.000). 3-Way Reciprocal Rank Fusion achieves **100% Tier-1 Recall@20 (1.000)** and a **+38% higher Spearman rank correlation** (0.617 vs 0.447 for LLM-only) by using continuous cross-encoder neural attention and vector signals to stabilize LLM score jitter.
+Both the pipeline and the LLM-only baseline place highly relevant candidates near the top of the ranking (Pipeline NDCG@5 = 0.967, MRR = 1.000; LLM-only NDCG@5 = 0.964, MRR = 1.000).
 
 Widening the funnel trades latency for full-list ordering, and the trade has been
 priced:
@@ -31,26 +31,18 @@ priced:
 | Funnel (retrieval / cross-encoder / LLM) | Kendall's τ | Total run |
 |---|---:|---:|
 | 30 / 30 / 10 | 0.495 | **8.6s** |
-| 82 / 82 / 82 *(whole pool)* | **0.680** | 54.7s |
+| 82 / 82 / 82 *(whole pool)* | **0.688** | 54.7s |
 
 All three limits are environment variables, so the operating point is a deployment
 choice rather than a code change. The default favours interactive latency (8.6s node wall-clock); raising
 `LLM_TOP_K`, `CROSS_ENCODER_TOP_K` and `RETRIEVAL_TOP_K` together recovers full-list
 ordering.
 
-**Scope of these results.** All 82 candidates (37 real uploaded CVs + 45 seeded profiles)
-are 100% individually judged across four relevance tiers against a Senior
-Business Analyst role. Evaluations use **Skills & Experience Only** candidate representations
-for vector retrieval and cross-encoder reranking. 43 out of 45 out-of-domain AI/ML distractor
-candidates are 100% rejected from the top rankings, achieving 100% Tier-1 Recall at k=20.
-
-*Metrics use TREC-style qrels with jackknife leave-one-out 95% confidence intervals
-and a one-sided paired permutation test (n = 10,000, p < 0.001 vs random).*
-
+**Scope of these results.** All 82 candidates (37 real uploaded CVs + 45 seeded profiles) are individually judged across four relevance tiers against a **single Senior Business Analyst job description**. Evaluations use **Skills & Experience Only** candidate representations for vector retrieval and cross-encoder reranking. **43 of 45 out-of-domain AI/ML distractor candidates are absent from the top 20**, while the pipeline achieves **100% Tier-1 Recall@20 (1.000)**, retrieving all labeled Strong-Fit candidates within the top 20.
 ### External Benchmark & Error Audit ([`cnamuangtoun/resume-job-description-fit`](https://huggingface.co/datasets/cnamuangtoun/resume-job-description-fit))
 
 * **Benchmarked pipeline against a 1,759-pair public dataset**, statistically outperforming a domain fine-tuned classifier ($p < 0.01$); audited prediction errors to uncover verified ground-truth label flaws, including out-of-domain resumes mislabeled as good fits.
-* **Audited Failure Modes & Ground-Truth Annotation Flaws**: Qualitative analysis of model-benchmark disagreements revealed systematic false positives in the benchmark's original ground-truth labels, stemming from coarse keyword and category matching:
+* **Audited Failure Modes & identified ground-truth annotation inconsistencies**: Qualitative analysis of model-benchmark disagreements revealed systematic false positives in the benchmark's original ground-truth labels, stemming from coarse keyword and category matching:
   - `test_1379`: A US Navy administrative clerk / funeral coordinator with zero engineering background was labeled `Good Fit` for a **Staff Engineer – Computer Vision (Perception)** role in autonomous vehicles (Pipeline & Cross-Encoder score: `0.0001` $\to$ correctly rejected).
   - `test_1356`: A front-desk receptionist / data entry coordinator was labeled `Good Fit` for a **Senior Data Engineer (Snowflake, Spark)** (Cross-Encoder score: `0.0792` $\to$ correctly rejected).
   - `test_1378`: A web software developer was labeled `Good Fit` for an **Electrical Hardware Design Engineer (PCB / Firmware Layout)** despite zero circuit design experience (Cross-Encoder score: `0.0008` $\to$ correctly rejected).
