@@ -1,4 +1,4 @@
-# Multi-Agent Resume Screening Assistant
+# Agentic Resume Screening Assistant
 
 An end-to-end agentic AI pipeline for talent pool screening and live voice interviews.  
 Seeds a candidate pool → narrows it against a job description through a 6-node LangGraph pipeline (vector retrieval → cross-encoder rerank → LLM scoring of the shortlist) → conducts real-time voice interviews with TTS questions and Whisper STT answers → produces scored reports with hiring verdicts — all persisted to MongoDB.
@@ -17,8 +17,10 @@ Ranking quality is measured with standard IR methodology — TREC-style qrels, j
 | Recall@20 (Tier-1) | **1.000** [1.000, 1.000] | 0.875 [0.625, 1.000] | 0.625 [0.375, 0.875] | 0.250 [0.000, 0.500] |
 | MAP@20 | **0.813** [0.710, 0.916] | 0.750 [0.620, 0.880] | 0.512 [0.380, 0.644] | 0.218 [0.110, 0.326] |
 | MRR | **1.000** [1.000, 1.000] | 1.000 [1.000, 1.000] | 0.500 [0.250, 0.750] | 0.125 [0.000, 0.250] |
-| Kendall's τ | **0.495** [0.410, 0.580] | 0.369 [0.280, 0.458] | 0.286 [0.201, 0.371] | −0.057 [−0.223, 0.110] |
-| Spearman's ρ | **0.617** [0.520, 0.714] | 0.447 [0.345, 0.549] | 0.371 [0.270, 0.472] | −0.072 [−0.287, 0.143] |
+| Kendall's τ (Funnel 30/30/10) | **0.495** [0.410, 0.580] | 0.369 [0.280, 0.458] | 0.286 [0.201, 0.371] | −0.057 [−0.223, 0.110] |
+| Kendall's τ (Full 82-Pool) | **0.688** [0.609, 0.767] | 0.684 [0.622, 0.746] | 0.659 [0.586, 0.733] | −0.057 [−0.223, 0.110] |
+| Spearman's ρ (Funnel 30/30/10) | **0.617** [0.520, 0.714] | 0.447 [0.345, 0.549] | 0.371 [0.270, 0.472] | −0.072 [−0.287, 0.143] |
+| Spearman's ρ (Full 82-Pool) | **0.807** [0.728, 0.886] | 0.822 [0.753, 0.891] | 0.793 [0.712, 0.874] | −0.072 [−0.287, 0.143] |
 
 Both the pipeline and deterministic baselines retrieve the right candidates into the
 top tier (NDCG@5 = 0.967, MRR = 1.000). 3-Way Reciprocal Rank Fusion achieves **100% Tier-1 Recall@20 (1.000)** and a **+38% higher Spearman rank correlation** (0.617 vs 0.447 for LLM-only) by using continuous cross-encoder neural attention and vector signals to stabilize LLM score jitter.
